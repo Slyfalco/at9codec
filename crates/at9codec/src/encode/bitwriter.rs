@@ -26,16 +26,24 @@ impl BitWriter {
             self.bit_pos += bits as usize;
             return;
         }
-        for i in (0..bits).rev() {
-            let bit = (value >> i) & 1;
+        if bits == 0 {
+            return;
+        }
+        let mut remaining = bits;
+        // Write in chunks, filling the current byte before moving on.
+        while remaining > 0 {
             let byte_idx = self.bit_pos >> 3;
             if byte_idx >= self.buf.len() {
                 self.buf.push(0);
             }
-            if bit == 1 {
-                self.buf[byte_idx] |= 1 << (7 - (self.bit_pos & 7));
-            }
-            self.bit_pos += 1;
+            let bit_off = (self.bit_pos & 7) as u32;
+            let avail = 8 - bit_off; // free bits left in the current byte
+            let take = remaining.min(avail);
+            // The `take` most-significant of the still-unwritten bits.
+            let chunk = (value >> (remaining - take)) & ((1u32 << take) - 1);
+            self.buf[byte_idx] |= (chunk << (avail - take)) as u8;
+            self.bit_pos += take as usize;
+            remaining -= take;
         }
     }
 

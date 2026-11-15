@@ -73,6 +73,24 @@ pub fn encode_spectra_snapped(w: &mut BitWriter, cb: &Codebook, coeffs: &[i32]) 
     }
 }
 
+/// Exact bit length `encode_spectra_snapped` would write for `coeffs`, without
+/// packing — used by the rate-control bit model.
+pub fn spectra_bits(cb: &Codebook, coeffs: &[i32]) -> usize {
+    let vc = cb.value_count();
+    let mut off = 0;
+    let mut bits = 0usize;
+    while off + vc <= coeffs.len() {
+        bits += cb.symbol_len(best_symbol(cb, coeffs, off)) as usize;
+        off += vc;
+    }
+    bits
+}
+
+/// Exact bit length `encode_scale_value` would write for `value`.
+pub fn scale_value_bits(cb: &Codebook, value: i32) -> usize {
+    cb.symbol_len((value & mask(cb.value_bits())) as usize) as usize
+}
+
 /// Encode one value with a scale-factor codebook (value_count 1). `value` is the
 /// signed delta/distance; it is masked to `value_bits` to find the symbol.
 pub fn encode_scale_value(w: &mut BitWriter, cb: &Codebook, value: i32) -> bool {

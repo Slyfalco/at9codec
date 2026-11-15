@@ -431,12 +431,76 @@ fn pack_block_to_vec(
     w.into_bytes()
 }
 
-/// Block bit length before the final byte-align, with the given filler.
-/// Uses a counting writer (no buffer) so sizing a block is cheap.
-fn block_bits(plan: &BlockPlan, first: bool, huff: &HuffmanTables, filler: Option<u32>) -> usize {
-    let mut w = BitWriter::counting();
-    pack_block(&mut w, plan, first, huff, filler);
-    w.bit_pos
+/// Exact bit length of the VLC delta-offset scale factors (mirrors
+/// `pack_scale_factors_vlc`), used by the bit model.
+fn sf_vlc_bits(sf: &[i32; 31], ext_unit: usize, huff: &HuffmanTables) -> usize {
+    let weights = &SCALE_FACTOR_WEIGHTS[0];
+    let adj = |i: usize| sf[i] + weights[i] as i32;
+    let base = (0..ext_unit).map(adj).min().unwrap_or(0).clamp(0, 31);
+    let maxr = (0..ext_unit).map(|i| adj(i) - base).max().unwrap_or(0);
+    let mut bitlen = 3u32;
+    while ((1i32 << bitlen) - 1) < maxr && bitlen < 6 {
+        bitlen += 1;
+    }
+    let cb = huff.sf_unsigned[bitlen as usize].as_ref().unwrap();
+    let value_max = cb.value_max();
+    let mut bits = 2 + 3 + 5 + 2 + bitlen as usize; // mode + weight + base + bitlen field + r0
+    let mut prev = adj(0) - base;
+    for i in 1..ext_unit {
+        let ri = adj(i) - base;
+        let delta = (ri - prev) & (value_max - 1);
+        bits += huffenc::scale_value_bits(cb, delta);
+        prev = ri;
+    }
+    bits
+}
+
+/// Exact pre-align bit length of a block for a given gradient, computed in a
+/// single fused quantize+count pass with no BlockPlan allocation (the ATRAC9
+/// analogue of HCA's CalculateUsedBits — exact per-value cost, not an estimate).
+/// Equals `block_bits(plan_from_sf(ctx, .., gsv, gb, ..), None)`.
+fn used_bits(
+    ctx: &SfCtx,
+    spectra: &[f64; 256],
+    gsv: i32,
+    gb: i32,
+    curves: &[[u8; 48]; 48],
+    huff: &HuffmanTables,
+    sf_bits: usize,
+) -> usize {
+    let quc = ctx.quc;
+    let gsu = ((quc as i32) - 1).clamp(1, 30);
+    let gb = gb.clamp(0, (quc as i32).min(15));
+    let gradient = create_gradient(gsu, gsv, quc, curves);
+    let (prec, pfine) = calc_precisions(&ctx.sf, &ctx.mask, &gradient, gb, quc);
+    // block header(2) + band params(5, mono) + gradient mode 2(16) + has_ext=0(1)
+    // + the (precomputed, gradient-independent) VLC scale-factor bits.
+    let mut bits = 2 + 5 + 16 + 1 + sf_bits;
+    let max_huff = MAX_HUFF_PRECISION[0] as i32;
+    let mut coeffs = [0i32; 16];
+    for i in 0..quc {
+        let lo = QUANT_UNIT_TO_COEFF_INDEX[i] as usize;
+        let hi = QUANT_UNIT_TO_COEFF_INDEX[i + 1] as usize;
+        let p = prec[i];
+        let inv = 1.0 / (QUANTIZER_STEP_SIZE[p as usize] * SPECTRUM_SCALE[ctx.sf[i] as usize]);
+        let cnt = hi - lo;
+        for k in 0..cnt {
+            coeffs[k] = clamp_signed((spectra[lo + k] * inv).round() as i64, p + 1);
+        }
+        if p + 1 <= max_huff {
+            let cb = huff.spectrum[ctx.codebook_set[i] as usize][(p + 1) as usize]
+                [QUANT_UNIT_TO_CODEBOOK_INDEX[i] as usize]
+                .as_ref()
+                .unwrap();
+            bits += huffenc::spectra_bits(cb, &coeffs[..cnt]);
+        } else {
+            bits += cnt * (p as usize + 1);
+        }
+        if pfine[i] > 0 {
+            bits += cnt * (pfine[i] as usize + 1);
+        }
+    }
+    bits
 }
 
 /// Pack one block to EXACTLY `target_bytes`, best quality first. Searches the
@@ -473,38 +537,37 @@ fn pack_block_exact(
         // Scale factors / mask / codebook set depend only on band+boost, so
         // compute them once and reuse across the gradient search.
         let ctx = block_sf(spectra, boost, Some(band), sri);
-        // Block size decreases as gsv rises, so binary-search the smallest gsv
-        // whose size leaves room for filler (bits <= target*8 - 7), then scan a
-        // few gsv/boundary combos around it for an exact fit.
-        let bits_at = |gsv: i32, gb: i32| {
-            block_bits(&plan_from_sf(&ctx, spectra, gsv, gb, curves), first, huff, None) as i64
-        };
+        // VLC scale-factor bits are gradient-independent: compute once per attempt.
+        let sf_bits = sf_vlc_bits(&ctx.sf, ctx.quc, huff);
+        // Block size decreases as gsv rises; binary-search the smallest gsv whose
+        // size leaves room for filler (bits <= target*8 - 7) using the fast bit
+        // model, then scan a few gradient/boundary combos around it for an exact
+        // fit and pack only the winner.
         let (mut lo, mut hi, mut start) = (0i32, 31i32, 32i32);
         while lo <= hi {
             let mid = (lo + hi) / 2;
-            if bits_at(mid, 15) <= target_bits - 7 {
+            if used_bits(&ctx, spectra, mid, 15, curves, huff, sf_bits) as i64 <= target_bits - 7 {
                 start = mid;
                 hi = mid - 1;
             } else {
                 lo = mid + 1;
             }
         }
-        // Scan around the boundary in both directions: at `start-1` the frame is
-        // slightly too big (lower the boundary to shrink it into range); at
-        // `start` it may be too small (raise the boundary). Each gsv × boundary
-        // combo shifts the size by a few bits, covering the window the integer
-        // gradient step skips.
-        for gsv in (start - 1).max(0)..=(start + 2).min(31) {
+        // Try the boundary gsv first (common fit), then widen the window. Order
+        // gsv as start, start+1.., then start-1.. so the usual hit comes first.
+        let order = [start, start - 1, start + 1, start + 2, start - 2];
+        for gsv in order.into_iter().filter(|&g| (0..=31).contains(&g)) {
             for &gb in &[15i32, 12, 8, 4, 0] {
-                let plan = plan_from_sf(&ctx, spectra, gsv, gb, curves);
-                let bits = block_bits(&plan, first, huff, None) as i64;
+                let bits = used_bits(&ctx, spectra, gsv, gb, curves, huff, sf_bits) as i64;
                 let n = target_bits - bits - 7;
                 if !(0..=31).contains(&n) {
                     continue;
                 }
+                let plan = plan_from_sf(&ctx, spectra, gsv, gb, curves);
                 let v = pack_block_to_vec(&plan, first, huff, Some(n as u32));
-                debug_assert_eq!(v.len(), target_bytes);
-                return Some(v);
+                if v.len() == target_bytes {
+                    return Some(v);
+                }
             }
         }
     }
@@ -612,18 +675,62 @@ pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
     let huff = HuffmanTables::new();
     let curves = gen_gradient_curves();
 
-    // Encode frames; assemble superframes padded to superframe_bytes.
+    // Encode superframes. They are independent (spectra are precomputed), so
+    // encode them across threads and concatenate in order. Uses only std threads
+    // to keep the library dependency-free.
     let superframe_bytes = frame_bytes * FRAMES_PER_SUPERFRAME;
-    let mut data = Vec::with_capacity(num_frames / FRAMES_PER_SUPERFRAME * superframe_bytes);
-    for sf_idx in 0..(num_frames / FRAMES_PER_SUPERFRAME) {
-        let sf_start = data.len();
+    let total_sf = num_frames / FRAMES_PER_SUPERFRAME;
+    let mut results: Vec<Vec<u8>> = vec![Vec::new(); total_sf];
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, total_sf.max(1));
+    let encode_sf = |sf_idx: usize, slot: &mut Vec<u8>| {
+        let mut buf = Vec::with_capacity(superframe_bytes);
         for fi in 0..FRAMES_PER_SUPERFRAME {
             let f = sf_idx * FRAMES_PER_SUPERFRAME + fi;
             let frame_spectra: Vec<[f64; 256]> = (0..channels).map(|c| spectra[c][f]).collect();
-            let bytes = encode_frame(&frame_spectra, fi == 0, sri, frame_bytes, &huff, &curves);
-            data.extend_from_slice(&bytes);
+            buf.extend_from_slice(&encode_frame(
+                &frame_spectra, fi == 0, sri, frame_bytes, &huff, &curves,
+            ));
         }
-        data.resize(sf_start + superframe_bytes, 0);
+        buf.resize(superframe_bytes, 0);
+        *slot = buf;
+    };
+    if nthreads <= 1 {
+        for (sf_idx, slot) in results.iter_mut().enumerate() {
+            encode_sf(sf_idx, slot);
+        }
+    } else {
+        let chunk = total_sf.div_ceil(nthreads);
+        let spectra = &spectra;
+        let huff = &huff;
+        let curves = &curves;
+        std::thread::scope(|s| {
+            for (ti, slots) in results.chunks_mut(chunk).enumerate() {
+                let base = ti * chunk;
+                s.spawn(move || {
+                    for (j, slot) in slots.iter_mut().enumerate() {
+                        let sf_idx = base + j;
+                        let mut buf = Vec::with_capacity(superframe_bytes);
+                        for fi in 0..FRAMES_PER_SUPERFRAME {
+                            let f = sf_idx * FRAMES_PER_SUPERFRAME + fi;
+                            let frame_spectra: Vec<[f64; 256]> =
+                                (0..channels).map(|c| spectra[c][f]).collect();
+                            buf.extend_from_slice(&encode_frame(
+                                &frame_spectra, fi == 0, sri, frame_bytes, huff, curves,
+                            ));
+                        }
+                        buf.resize(superframe_bytes, 0);
+                        *slot = buf;
+                    }
+                });
+            }
+        });
+    }
+    let mut data = Vec::with_capacity(total_sf * superframe_bytes);
+    for sf in results {
+        data.extend_from_slice(&sf);
     }
 
     let config = EncoderConfig {
