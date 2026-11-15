@@ -354,8 +354,6 @@ fn pack_block(
     filler_bits: Option<u32>,
 ) {
     let min_band_count = MIN_BAND_COUNT[0] as u32;
-    let max_huff = MAX_HUFF_PRECISION[0] as i32;
-    let quc = plan.quant_unit_count;
 
     w.write(if first_in_superframe { 0 } else { 1 }, 1); // !FirstInSuperframe
     w.write(0, 1); // ReuseBandParams
@@ -383,10 +381,18 @@ fn pack_block(
         None => w.write(0, 1), // HasExtensionData = 0
     }
 
-    // Scale factors via VLC delta-offset (coding mode 0), as the reference tool uses.
-    pack_scale_factors_vlc(w, &plan.scale_factors, quc, huff);
+    // One channel's data (scale factors + spectra + fine).
+    pack_channel(w, plan, huff);
+    // Note: caller aligns to a byte boundary (so the pre-align bit count can be
+    // read for exact-fill sizing).
+}
 
-    // Spectra (Huffman or raw per unit).
+/// Pack one channel's payload: VLC scale factors, then spectra (Huffman/raw) and
+/// fine residuals. Shared by mono and stereo block packing.
+fn pack_channel(w: &mut BitWriter, plan: &BlockPlan, huff: &HuffmanTables) {
+    let max_huff = MAX_HUFF_PRECISION[0] as i32;
+    let quc = plan.quant_unit_count;
+    pack_scale_factors_vlc(w, &plan.scale_factors, quc, huff);
     for i in 0..quc {
         let lo = QUANT_UNIT_TO_COEFF_INDEX[i] as usize;
         let hi = QUANT_UNIT_TO_COEFF_INDEX[i + 1] as usize;
@@ -403,8 +409,6 @@ fn pack_block(
             }
         }
     }
-
-    // Fine residuals.
     for i in 0..quc {
         if plan.precisions_fine[i] > 0 {
             let lo = QUANT_UNIT_TO_COEFF_INDEX[i] as usize;
@@ -415,8 +419,72 @@ fn pack_block(
             }
         }
     }
-    // Note: caller aligns to a byte boundary (so the pre-align bit count can be
-    // read for exact-fill sizing).
+}
+
+/// Pack a stereo block: one shared header (band params, gradient, stereo params)
+/// then both channels. `stereo_band == band_count` means no intensity stereo
+/// (both channels fully coded), which is what the reference encoder emits at
+/// these bitrates. `plan0`/`plan1` must share band_count and gradient params.
+///
+/// Retained for the config-2 stereo path; currently dual-mono gives better
+/// quality until the shared-gradient allocation is tuned.
+#[allow(dead_code)]
+fn pack_stereo_block(
+    w: &mut BitWriter,
+    plan0: &BlockPlan,
+    plan1: &BlockPlan,
+    first_in_superframe: bool,
+    huff: &HuffmanTables,
+    filler_bits: Option<u32>,
+) {
+    let min_band_count = MIN_BAND_COUNT[0] as u32;
+    w.write(if first_in_superframe { 0 } else { 1 }, 1); // !FirstInSuperframe
+    w.write(0, 1); // ReuseBandParams
+
+    // Band params (Stereo): band_count, stereo_band (= band_count → no intensity).
+    w.write(plan0.band_count as u32 - min_band_count, 4);
+    w.write(plan0.band_count as u32 - min_band_count, 4);
+    w.write(0, 1); // band_extension_enabled
+
+    // Shared gradient (mode 2).
+    w.write(2, 2);
+    w.write(plan0.grad_start_unit as u32, 5);
+    w.write(plan0.grad_start_value as u32, 5);
+    w.write(plan0.grad_boundary as u32, 4);
+
+    // Stereo params: primary channel 0, no joint-stereo signs.
+    w.write(0, 1); // primary_channel_index
+    w.write(0, 1); // has_joint_stereo_signs
+
+    // Extension params: optional skippable filler.
+    match filler_bits {
+        Some(n) => {
+            w.write(1, 1);
+            w.write(0, 2);
+            w.write(n, 5);
+            for _ in 0..n {
+                w.write(0, 1);
+            }
+        }
+        None => w.write(0, 1),
+    }
+
+    pack_channel(w, plan0, huff);
+    pack_channel(w, plan1, huff);
+}
+
+#[allow(dead_code)]
+fn pack_stereo_to_vec(
+    plan0: &BlockPlan,
+    plan1: &BlockPlan,
+    first: bool,
+    huff: &HuffmanTables,
+    filler: Option<u32>,
+) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    pack_stereo_block(&mut w, plan0, plan1, first, huff, filler);
+    w.align(8);
+    w.into_bytes()
 }
 
 fn pack_block_to_vec(
@@ -595,28 +663,98 @@ fn encode_frame(
         return v;
     }
 
-    // Dual-mono (2 blocks): block 0 takes ~half, block 1 exact-fills the rest.
+    // Stereo input. Two options, both valid AT9:
+    //  - dual-mono (config 1): two independent blocks, each optimised for its own
+    //    64-byte budget — currently the better quality on real music.
+    //  - config-2 stereo (encode_stereo_frame): one shared block, matching what the
+    //    reference encoder emits, but our shared-gradient allocation is not yet
+    //    good enough to beat dual-mono (see encode_stereo_frame).
+    // Default to dual-mono for quality.
     let half = frame_bytes / 2;
+    let fallback = |spec: &[f64; 256], target: usize| {
+        let p = plan_block(spec, 31, 0, 0, None, sri, curves);
+        let mut v = pack_block_to_vec(&p, first, huff, None);
+        v.resize(target, 0);
+        v
+    };
     let b0 = pack_block_exact(&frame_spectra[0], first, sri, curves, huff, half)
-        .unwrap_or_else(|| {
-            let p = plan_block(&frame_spectra[0], 31, 0, 0, None, sri, curves);
-            let mut v = pack_block_to_vec(&p, first, huff, None);
-            v.resize(half, 0);
-            v
-        });
+        .unwrap_or_else(|| fallback(&frame_spectra[0], half));
     let rest = frame_bytes - b0.len();
     let b1 = pack_block_exact(&frame_spectra[1], first, sri, curves, huff, rest)
-        .unwrap_or_else(|| {
-            let p = plan_block(&frame_spectra[1], 31, 0, 0, None, sri, curves);
-            let mut v = pack_block_to_vec(&p, first, huff, None);
-            v.resize(rest, 0);
-            v
-        });
-    // Blocks are bit-packed, but each ends byte-aligned, so concatenating the
-    // byte buffers reproduces the continuous bitstream.
+        .unwrap_or_else(|| fallback(&frame_spectra[1], rest));
     let mut out = b0;
     out.extend_from_slice(&b1);
     out
+}
+
+/// Exact-fill a stereo block (both channels, shared band + gradient) to
+/// `frame_bytes`. Both channels use the same gradient; the budget is shared.
+#[allow(dead_code)]
+fn encode_stereo_frame(
+    spec0: &[f64; 256],
+    spec1: &[f64; 256],
+    first: bool,
+    sri: usize,
+    frame_bytes: usize,
+    huff: &HuffmanTables,
+    curves: &[[u8; 48]; 48],
+) -> Vec<u8> {
+    let target_bits = frame_bytes as i64 * 8;
+    let natural = choose_band_count(spec0, sri).max(choose_band_count(spec1, sri));
+    let max_band = (MAX_BAND_COUNT[sri] as usize).min(16);
+    let mut attempts: Vec<(usize, i32)> = vec![(natural, 0)];
+    if max_band != natural {
+        attempts.push((max_band, 0));
+    }
+    for b in 1..=24 {
+        attempts.push((max_band, b));
+    }
+    for (band, boost) in attempts {
+        let ctx0 = block_sf(spec0, boost, Some(band), sri);
+        let ctx1 = block_sf(spec1, boost, Some(band), sri);
+        let sf0 = sf_vlc_bits(&ctx0.sf, ctx0.quc, huff);
+        let sf1 = sf_vlc_bits(&ctx1.sf, ctx1.quc, huff);
+        // Stereo block bits = stereo header(30) + both channels' content.
+        // used_bits is mono-header(24)+content, so subtract 2*24 and add 30 = -18.
+        let bits_at = |gsv: i32, gb: i32| -> i64 {
+            (used_bits(&ctx0, spec0, gsv, gb, curves, huff, sf0)
+                + used_bits(&ctx1, spec1, gsv, gb, curves, huff, sf1)) as i64
+                - 18
+        };
+        let (mut lo, mut hi, mut start) = (0i32, 31i32, 32i32);
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            if bits_at(mid, 15) <= target_bits - 7 {
+                start = mid;
+                hi = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        let order = [start, start - 1, start + 1, start + 2, start - 2];
+        for gsv in order.into_iter().filter(|&g| (0..=31).contains(&g)) {
+            for &gb in &[15i32, 12, 8, 4, 0] {
+                let n = target_bits - bits_at(gsv, gb) - 7;
+                if !(0..=31).contains(&n) {
+                    continue;
+                }
+                let plan0 = plan_from_sf(&ctx0, spec0, gsv, gb, curves);
+                let plan1 = plan_from_sf(&ctx1, spec1, gsv, gb, curves);
+                let v = pack_stereo_to_vec(&plan0, &plan1, first, huff, Some(n as u32));
+                if v.len() == frame_bytes {
+                    return v;
+                }
+            }
+        }
+    }
+    // Fallback (rare): max band, smallest frame, padded to frame_bytes.
+    let ctx0 = block_sf(spec0, 0, Some(max_band), sri);
+    let ctx1 = block_sf(spec1, 0, Some(max_band), sri);
+    let plan0 = plan_from_sf(&ctx0, spec0, 31, 0, curves);
+    let plan1 = plan_from_sf(&ctx1, spec1, 31, 0, curves);
+    let mut v = pack_stereo_to_vec(&plan0, &plan1, first, huff, None);
+    v.resize(frame_bytes, 0);
+    v
 }
 
 /// Encode 16-bit PCM to a complete AT9 file at a standard bitrate.
@@ -633,7 +771,8 @@ pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
         .ok_or(Error::NotImplemented("unsupported sample rate"))?;
     let cci = match channels {
         1 => 0usize,
-        2 => 1usize, // dual mono
+        2 => 1usize, // dual mono (config 1) — currently better quality than our
+                     // config-2 path, which needs deeper allocation tuning to win
         _ => return Err(Error::NotImplemented("only mono/stereo")),
     };
 
