@@ -226,34 +226,41 @@ fn clamp_signed(v: i64, bits: i32) -> i32 {
 
 /// Plan one block for a given gradient start-value (the rate knob). Codebook-fit
 /// is handled at pack time by symbol snapping, so no precision bumping is needed.
-#[allow(clippy::needless_range_loop)]
-fn plan_block(
-    spectra: &[f64; 256],
-    gsv: i32,
-    gb: i32,
-    boost: i32,
-    band_override: Option<usize>,
-    sri: usize,
-    curves: &[[u8; 48]; 48],
-) -> BlockPlan {
+/// Scale-factor context for a block: everything that depends only on the
+/// spectrum/band/boost (not the gradient), computed once and reused across the
+/// gradient search.
+struct SfCtx {
+    sf: [i32; 31],
+    quc: usize,
+    band_count: usize,
+    mask: [i32; 30],
+    codebook_set: [i32; 30],
+}
+
+fn block_sf(spectra: &[f64; 256], boost: i32, band_override: Option<usize>, sri: usize) -> SfCtx {
     let band_count = band_override.unwrap_or_else(|| choose_band_count(spectra, sri));
     let quc = BAND_TO_QUANT_UNIT_COUNT[band_count] as usize;
     let mut sf = scale_factors_from_spectrum(spectra, quc);
-    // `boost` raises scale factors uniformly to grow the frame (more precision =
-    // more bits), used by the exact-fill search — harmless on quiet units.
     if boost > 0 {
         for s in sf.iter_mut().take(quc) {
             *s = (*s + boost).min(31);
         }
     }
+    let mask = calc_mask(&sf, quc);
+    let codebook_set = calc_codebook_set(&sf, quc);
+    SfCtx { sf, quc, band_count, mask, codebook_set }
+}
 
+#[allow(clippy::needless_range_loop)]
+fn plan_from_sf(ctx: &SfCtx, spectra: &[f64; 256], gsv: i32, gb: i32, curves: &[[u8; 48]; 48]) -> BlockPlan {
+    let quc = ctx.quc;
+    let sf = ctx.sf;
     // Gradient mode 2 curve near the top band; boundary lifts the low units.
     let gsu = ((quc as i32) - 1).clamp(1, 30);
     let gb = gb.clamp(0, (quc as i32).min(15));
     let gradient = create_gradient(gsu, gsv, quc, curves);
-    let mask = calc_mask(&sf, quc);
-    let (precisions, precisions_fine) = calc_precisions(&sf, &mask, &gradient, gb, quc);
-    let codebook_set = calc_codebook_set(&sf, quc);
+    let (precisions, precisions_fine) = calc_precisions(&sf, &ctx.mask, &gradient, gb, quc);
+    let codebook_set = ctx.codebook_set;
 
     let mut quantized = [0i32; 256];
     let mut quantized_fine = [0i32; 256];
@@ -276,7 +283,7 @@ fn plan_block(
     }
 
     BlockPlan {
-        band_count,
+        band_count: ctx.band_count,
         quant_unit_count: quc,
         grad_start_unit: gsu,
         grad_start_value: gsv,
@@ -288,6 +295,19 @@ fn plan_block(
         quantized,
         quantized_fine,
     }
+}
+
+fn plan_block(
+    spectra: &[f64; 256],
+    gsv: i32,
+    gb: i32,
+    boost: i32,
+    band_override: Option<usize>,
+    sri: usize,
+    curves: &[[u8; 48]; 48],
+) -> BlockPlan {
+    let ctx = block_sf(spectra, boost, band_override, sri);
+    plan_from_sf(&ctx, spectra, gsv, gb, curves)
 }
 
 /// Encode scale factors with VLC delta-offset (coding mode 0), matching the reference tool.
@@ -395,12 +415,10 @@ fn pack_block(
             }
         }
     }
-
-    w.align(8);
+    // Note: caller aligns to a byte boundary (so the pre-align bit count can be
+    // read for exact-fill sizing).
 }
 
-/// Encode one frame (all channels) to bytes, searching the gradient for the best
-/// quality that fits `frame_bytes`.
 fn pack_block_to_vec(
     plan: &BlockPlan,
     first: bool,
@@ -409,7 +427,15 @@ fn pack_block_to_vec(
 ) -> Vec<u8> {
     let mut w = BitWriter::new();
     pack_block(&mut w, plan, first, huff, filler);
+    w.align(8);
     w.into_bytes()
+}
+
+/// Block bit length before the final byte-align, with the given filler.
+fn block_bits(plan: &BlockPlan, first: bool, huff: &HuffmanTables, filler: Option<u32>) -> usize {
+    let mut w = BitWriter::new();
+    pack_block(&mut w, plan, first, huff, filler);
+    w.bit_pos
 }
 
 /// Pack one block to EXACTLY `target_bytes`, best quality first. Searches the
@@ -437,21 +463,47 @@ fn pack_block_exact(
         attempts.push((max_band, b)); // scale-factor boost for near-silent frames
     }
 
+    // Filler maths: a block packed with no extension data is `bits` bits long
+    // (pre-align); enabling the skippable extension replaces that 1 bit with
+    // 8 + N bits, so total = bits + 7 + N. Choosing N = target*8 - bits - 7 makes
+    // the block exactly `target_bytes`, valid when N is in 0..=31.
+    let target_bits = target_bytes as i64 * 8;
     for (band, boost) in attempts {
-        for gsv in 0..=31i32 {
+        // Scale factors / mask / codebook set depend only on band+boost, so
+        // compute them once and reuse across the gradient search.
+        let ctx = block_sf(spectra, boost, Some(band), sri);
+        // Block size decreases as gsv rises, so binary-search the smallest gsv
+        // whose size leaves room for filler (bits <= target*8 - 7), then scan a
+        // few gsv/boundary combos around it for an exact fit.
+        let bits_at = |gsv: i32, gb: i32| {
+            block_bits(&plan_from_sf(&ctx, spectra, gsv, gb, curves), first, huff, None) as i64
+        };
+        let (mut lo, mut hi, mut start) = (0i32, 31i32, 32i32);
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            if bits_at(mid, 15) <= target_bits - 7 {
+                start = mid;
+                hi = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        // Scan around the boundary in both directions: at `start-1` the frame is
+        // slightly too big (lower the boundary to shrink it into range); at
+        // `start` it may be too small (raise the boundary). Each gsv × boundary
+        // combo shifts the size by a few bits, covering the window the integer
+        // gradient step skips.
+        for gsv in (start - 1).max(0)..=(start + 2).min(31) {
             for &gb in &[15i32, 12, 8, 4, 0] {
-                let plan = plan_block(spectra, gsv, gb, boost, Some(band), sri, curves);
-                if pack_block_to_vec(&plan, first, huff, None).len() > target_bytes {
+                let plan = plan_from_sf(&ctx, spectra, gsv, gb, curves);
+                let bits = block_bits(&plan, first, huff, None) as i64;
+                let n = target_bits - bits - 7;
+                if !(0..=31).contains(&n) {
                     continue;
                 }
-                for n in 0..=31u32 {
-                    let v = pack_block_to_vec(&plan, first, huff, Some(n));
-                    match v.len().cmp(&target_bytes) {
-                        std::cmp::Ordering::Equal => return Some(v),
-                        std::cmp::Ordering::Greater => break,
-                        std::cmp::Ordering::Less => {}
-                    }
-                }
+                let v = pack_block_to_vec(&plan, first, huff, Some(n as u32));
+                debug_assert_eq!(v.len(), target_bytes);
+                return Some(v);
             }
         }
     }
