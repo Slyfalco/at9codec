@@ -382,17 +382,82 @@ fn pack_block(
     }
 
     // One channel's data (scale factors + spectra + fine).
-    pack_channel(w, plan, huff);
+    pack_channel(w, plan, huff, None);
     // Note: caller aligns to a byte boundary (so the pre-align bit count can be
     // read for exact-fill sizing).
 }
 
-/// Pack one channel's payload: VLC scale factors, then spectra (Huffman/raw) and
-/// fine residuals. Shared by mono and stereo block packing.
-fn pack_channel(w: &mut BitWriter, plan: &BlockPlan, huff: &HuffmanTables) {
+/// Bits to code channel-1 scale factors as signed distances from channel 0's
+/// (coding mode 1). Returns `(bits, bit_length)`, or None if no codebook can
+/// represent all distances. Cheaper than independent coding when channels are
+/// similar — frees bits for precision, as the reference encoder does.
+fn sf_vlc_relative_bits(
+    sf1: &[i32; 31],
+    sf0: &[i32; 31],
+    ext_unit: usize,
+    huff: &HuffmanTables,
+) -> Option<(usize, u32)> {
+    for bitlen in 2..=5u32 {
+        let Some(cb) = huff.sf_signed[bitlen as usize].as_ref() else {
+            continue;
+        };
+        let lo = -(1i32 << (bitlen - 1));
+        let hi = (1i32 << (bitlen - 1)) - 1;
+        let mut bits = 2 + 2; // coding mode + bit-length field
+        let mut ok = true;
+        for i in 0..ext_unit {
+            let d = sf1[i] - sf0[i];
+            if d < lo || d > hi {
+                ok = false;
+                break;
+            }
+            let sl = huffenc::scale_value_bits(cb, d);
+            if sl == 0 {
+                ok = false; // distance absent from this codebook
+                break;
+            }
+            bits += sl;
+        }
+        if ok {
+            return Some((bits, bitlen));
+        }
+    }
+    None
+}
+
+/// Pack channel-1 scale factors relative to channel 0 (coding mode 1).
+fn pack_scale_factors_relative(
+    w: &mut BitWriter,
+    sf1: &[i32; 31],
+    sf0: &[i32; 31],
+    ext_unit: usize,
+    huff: &HuffmanTables,
+    bitlen: u32,
+) {
+    let cb = huff.sf_signed[bitlen as usize].as_ref().unwrap();
+    w.write(1, 2); // coding mode 1 (distance to baseline)
+    w.write(bitlen - 2, 2);
+    for i in 0..ext_unit {
+        huffenc::encode_scale_value(w, cb, sf1[i] - sf0[i]);
+    }
+}
+
+/// Pack one channel's payload: scale factors (independent, or relative to a
+/// baseline for channel 1), then spectra (Huffman/raw) and fine residuals.
+fn pack_channel(
+    w: &mut BitWriter,
+    plan: &BlockPlan,
+    huff: &HuffmanTables,
+    relative: Option<(&[i32; 31], u32)>,
+) {
     let max_huff = MAX_HUFF_PRECISION[0] as i32;
     let quc = plan.quant_unit_count;
-    pack_scale_factors_vlc(w, &plan.scale_factors, quc, huff);
+    match relative {
+        Some((baseline, bitlen)) => {
+            pack_scale_factors_relative(w, &plan.scale_factors, baseline, quc, huff, bitlen)
+        }
+        None => pack_scale_factors_vlc(w, &plan.scale_factors, quc, huff),
+    }
     for i in 0..quc {
         let lo = QUANT_UNIT_TO_COEFF_INDEX[i] as usize;
         let hi = QUANT_UNIT_TO_COEFF_INDEX[i + 1] as usize;
@@ -428,7 +493,6 @@ fn pack_channel(w: &mut BitWriter, plan: &BlockPlan, huff: &HuffmanTables) {
 ///
 /// Retained for the config-2 stereo path; currently dual-mono gives better
 /// quality until the shared-gradient allocation is tuned.
-#[allow(dead_code)]
 fn pack_stereo_block(
     w: &mut BitWriter,
     plan0: &BlockPlan,
@@ -469,11 +533,19 @@ fn pack_stereo_block(
         None => w.write(0, 1),
     }
 
-    pack_channel(w, plan0, huff);
-    pack_channel(w, plan1, huff);
+    pack_channel(w, plan0, huff, None);
+    // Channel 1: code scale factors relative to channel 0 when that is cheaper.
+    let quc = plan1.quant_unit_count;
+    let rel = sf_vlc_relative_bits(&plan1.scale_factors, &plan0.scale_factors, quc, huff);
+    let mode0 = sf_vlc_bits(&plan1.scale_factors, quc, huff);
+    match rel {
+        Some((relbits, bitlen)) if relbits < mode0 => {
+            pack_channel(w, plan1, huff, Some((&plan0.scale_factors, bitlen)))
+        }
+        _ => pack_channel(w, plan1, huff, None),
+    }
 }
 
-#[allow(dead_code)]
 fn pack_stereo_to_vec(
     plan0: &BlockPlan,
     plan1: &BlockPlan,
@@ -621,21 +693,36 @@ fn pack_block_exact(
                 lo = mid + 1;
             }
         }
-        // Try the boundary gsv first (common fit), then widen the window. Order
-        // gsv as start, start+1.., then start-1.. so the usual hit comes first.
+        // For each gradient near the fit, pick the highest boundary that still
+        // fits (most low-frequency precision, least filler), then take the overall
+        // least-filler combo and pack only it.
         let order = [start, start - 1, start + 1, start + 2, start - 2];
+        let mut best: Option<(i32, i32, i64)> = None; // gsv, gb, n
         for gsv in order.into_iter().filter(|&g| (0..=31).contains(&g)) {
-            for &gb in &[15i32, 12, 8, 4, 0] {
-                let bits = used_bits(&ctx, spectra, gsv, gb, curves, huff, sf_bits) as i64;
+            let (mut lo2, mut hi2, mut bg) = (0i32, 15i32, -1i32);
+            while lo2 <= hi2 {
+                let mid = (lo2 + hi2) / 2;
+                if used_bits(&ctx, spectra, gsv, mid, curves, huff, sf_bits) as i64 <= target_bits - 7
+                {
+                    bg = mid;
+                    lo2 = mid + 1;
+                } else {
+                    hi2 = mid - 1;
+                }
+            }
+            if bg >= 0 {
+                let bits = used_bits(&ctx, spectra, gsv, bg, curves, huff, sf_bits) as i64;
                 let n = target_bits - bits - 7;
-                if !(0..=31).contains(&n) {
-                    continue;
+                if (0..=31).contains(&n) && best.map_or(true, |(_, _, bn)| n < bn) {
+                    best = Some((gsv, bg, n));
                 }
-                let plan = plan_from_sf(&ctx, spectra, gsv, gb, curves);
-                let v = pack_block_to_vec(&plan, first, huff, Some(n as u32));
-                if v.len() == target_bytes {
-                    return Some(v);
-                }
+            }
+        }
+        if let Some((gsv, gb, n)) = best {
+            let plan = plan_from_sf(&ctx, spectra, gsv, gb, curves);
+            let v = pack_block_to_vec(&plan, first, huff, Some(n as u32));
+            if v.len() == target_bytes {
+                return Some(v);
             }
         }
     }
@@ -663,33 +750,14 @@ fn encode_frame(
         return v;
     }
 
-    // Stereo input. Two options, both valid AT9:
-    //  - dual-mono (config 1): two independent blocks, each optimised for its own
-    //    64-byte budget — currently the better quality on real music.
-    //  - config-2 stereo (encode_stereo_frame): one shared block, matching what the
-    //    reference encoder emits, but our shared-gradient allocation is not yet
-    //    good enough to beat dual-mono (see encode_stereo_frame).
-    // Default to dual-mono for quality.
-    let half = frame_bytes / 2;
-    let fallback = |spec: &[f64; 256], target: usize| {
-        let p = plan_block(spec, 31, 0, 0, None, sri, curves);
-        let mut v = pack_block_to_vec(&p, first, huff, None);
-        v.resize(target, 0);
-        v
-    };
-    let b0 = pack_block_exact(&frame_spectra[0], first, sri, curves, huff, half)
-        .unwrap_or_else(|| fallback(&frame_spectra[0], half));
-    let rest = frame_bytes - b0.len();
-    let b1 = pack_block_exact(&frame_spectra[1], first, sri, curves, huff, rest)
-        .unwrap_or_else(|| fallback(&frame_spectra[1], rest));
-    let mut out = b0;
-    out.extend_from_slice(&b1);
-    out
+    // Stereo input → one config-2 stereo block (the standard stereo AT9 layout,
+    // matching the reference encoder), with channel-1 scale factors coded
+    // relative to channel 0 to free bits for precision.
+    encode_stereo_frame(&frame_spectra[0], &frame_spectra[1], first, sri, frame_bytes, huff, curves)
 }
 
 /// Exact-fill a stereo block (both channels, shared band + gradient) to
 /// `frame_bytes`. Both channels use the same gradient; the budget is shared.
-#[allow(dead_code)]
 fn encode_stereo_frame(
     spec0: &[f64; 256],
     spec1: &[f64; 256],
@@ -713,7 +781,12 @@ fn encode_stereo_frame(
         let ctx0 = block_sf(spec0, boost, Some(band), sri);
         let ctx1 = block_sf(spec1, boost, Some(band), sri);
         let sf0 = sf_vlc_bits(&ctx0.sf, ctx0.quc, huff);
-        let sf1 = sf_vlc_bits(&ctx1.sf, ctx1.quc, huff);
+        // Channel 1: size with the cheaper of independent / relative-to-ch0 coding
+        // (relative frees bits for precision, which `pack_stereo_block` then uses).
+        let sf1_indep = sf_vlc_bits(&ctx1.sf, ctx1.quc, huff);
+        let sf1 = sf_vlc_relative_bits(&ctx1.sf, &ctx0.sf, ctx1.quc, huff)
+            .map(|(b, _)| b.min(sf1_indep))
+            .unwrap_or(sf1_indep);
         // Stereo block bits = stereo header(30) + both channels' content.
         // used_bits is mono-header(24)+content, so subtract 2*24 and add 30 = -18.
         let bits_at = |gsv: i32, gb: i32| -> i64 {
@@ -731,19 +804,35 @@ fn encode_stereo_frame(
                 lo = mid + 1;
             }
         }
+        // For each gradient near the fit, pick the highest boundary that still
+        // fits (most low-frequency precision and least filler), then choose the
+        // overall combo with the least filler (most content). Pack only once.
         let order = [start, start - 1, start + 1, start + 2, start - 2];
+        let mut best: Option<(i32, i32, i64)> = None; // gsv, gb, n
         for gsv in order.into_iter().filter(|&g| (0..=31).contains(&g)) {
-            for &gb in &[15i32, 12, 8, 4, 0] {
-                let n = target_bits - bits_at(gsv, gb) - 7;
-                if !(0..=31).contains(&n) {
-                    continue;
+            let (mut lo2, mut hi2, mut bg) = (0i32, 15i32, -1i32);
+            while lo2 <= hi2 {
+                let mid = (lo2 + hi2) / 2;
+                if bits_at(gsv, mid) <= target_bits - 7 {
+                    bg = mid;
+                    lo2 = mid + 1;
+                } else {
+                    hi2 = mid - 1;
                 }
-                let plan0 = plan_from_sf(&ctx0, spec0, gsv, gb, curves);
-                let plan1 = plan_from_sf(&ctx1, spec1, gsv, gb, curves);
-                let v = pack_stereo_to_vec(&plan0, &plan1, first, huff, Some(n as u32));
-                if v.len() == frame_bytes {
-                    return v;
+            }
+            if bg >= 0 {
+                let n = target_bits - bits_at(gsv, bg) - 7;
+                if (0..=31).contains(&n) && best.map_or(true, |(_, _, bn)| n < bn) {
+                    best = Some((gsv, bg, n));
                 }
+            }
+        }
+        if let Some((gsv, gb, n)) = best {
+            let plan0 = plan_from_sf(&ctx0, spec0, gsv, gb, curves);
+            let plan1 = plan_from_sf(&ctx1, spec1, gsv, gb, curves);
+            let v = pack_stereo_to_vec(&plan0, &plan1, first, huff, Some(n as u32));
+            if v.len() == frame_bytes {
+                return v;
             }
         }
     }
@@ -771,8 +860,7 @@ pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
         .ok_or(Error::NotImplemented("unsupported sample rate"))?;
     let cci = match channels {
         1 => 0usize,
-        2 => 1usize, // dual mono (config 1) — currently better quality than our
-                     // config-2 path, which needs deeper allocation tuning to win
+        2 => 2usize, // stereo block (config 2) — the standard for stereo AT9
         _ => return Err(Error::NotImplemented("only mono/stereo")),
     };
 
