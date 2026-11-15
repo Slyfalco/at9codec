@@ -1,12 +1,12 @@
 # at9codec
 
-A **clean-room** implementation of the PlayStation **ATRAC9 ("AT9")** audio codec
-in Rust — no PlayStation code. It builds a small, portable native library
+A **clean-room** implementation of the **ATRAC9 ("AT9")** audio codec
+in Rust — no proprietary or decompiled code. It builds a small, portable native library
 (`.dll` / `.so` / `.dylib`) plus a CLI (`at9`), so applications can decode and
-(eventually) **encode** AT9 without a Windows-only reference AT9 tool or a bundled
+(eventually) **encode** AT9 without the Windows-only the reference tool or a bundled
 Wine.
 
-Today the only working AT9 encoder is a Windows-only reference AT9 tool, which
+Today the only working AT9 encoder is the Windows-only the reference tool, which
 forces non-Windows apps to ship it under Wine. A native, cross-platform codec
 removes that dependency and makes AT9 usable from any language on any OS.
 
@@ -19,7 +19,7 @@ removes that dependency and makes AT9 usable from any language on any OS.
 | Validation harness (round-trip vs the reference tool/VGAudio) | ✅ done (`tools/compare.py`) |
 | Encode (from scratch — no open ATRAC9 encoder exists) | ⬜ not started |
 
-Decode is verified **bit-for-bit identical** to the reference tool and VGAudio across
+Decode is verified **bit-for-bit identical** to the reference the reference tool and VGAudio across
 every test file (max sample difference 0). Run `tools/compare.py` against a folder
 of `.at9` files with the reference tool/`the reference encoder.exe` available to reproduce.
 
@@ -55,7 +55,7 @@ reference/          clean-room reference sources, analysis only (git-ignored)
 Derived from the open, MIT-licensed clean-room references
 [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9) (decode) and
 [VGAudio](https://github.com/Thealexbarney/VGAudio) (encode structure), plus
-public DSP technique. the reference tool is used **only as a black-box validation
+public DSP technique. The reference the reference tool is used **only as a black-box validation
 oracle** (known inputs → inspect outputs) — never decompiled into shipped code.
 
 ## License

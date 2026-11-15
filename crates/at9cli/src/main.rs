@@ -29,6 +29,7 @@ fn main() -> ExitCode {
         Some("info") if args.len() == 2 => cmd_info(&args[1]),
         Some("decode") if args.len() == 3 => cmd_decode(&args[1], &args[2]),
         Some("encode") if args.len() == 3 => cmd_encode(&args[1], &args[2]),
+        Some("rewrap") if args.len() == 3 => cmd_rewrap(&args[1], &args[2]),
         _ => {
             usage();
             ExitCode::FAILURE
@@ -89,6 +90,32 @@ fn cmd_info(path: &str) -> ExitCode {
         None => println!("loop            : none"),
     }
     println!("data            : offset={} len={}", c.data_offset, c.data_len);
+    ExitCode::SUCCESS
+}
+
+/// Re-wrap an existing AT9 file's frame data with our own container writer.
+/// Diagnostic: isolates whether our container (vs our frame encoding) is valid.
+fn cmd_rewrap(input: &str, output: &str) -> ExitCode {
+    let buf = std::fs::read(input).expect("read");
+    let c = at9codec::parse(&buf).expect("parse");
+    let data = c.data(&buf).to_vec();
+    let cfg = at9codec::encode::EncoderConfig {
+        sample_rate_index: c.config.sample_rate_index as usize,
+        channel_config_index: c.config.channel_config_index as usize,
+        superframe_index: c.config.superframe_index as u32,
+        frame_bytes: c.config.frame_bytes as u32,
+        sample_rate: c.sample_rate,
+        channels: c.channels,
+        frame_samples: c.config.frame_samples as usize,
+        frames_per_superframe: c.config.frames_per_superframe as usize,
+        superframe_bytes: c.block_align as u32,
+    };
+    let out = at9codec::encode::build_at9_container(
+        &cfg, &data, c.total_samples, c.encoder_delay,
+        c.loop_info.map(|l| l.start),
+    );
+    std::fs::write(output, &out).expect("write");
+    println!("rewrapped {} -> {output} ({} bytes)", input, out.len());
     ExitCode::SUCCESS
 }
 

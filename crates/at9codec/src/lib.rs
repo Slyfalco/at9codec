@@ -1,22 +1,22 @@
 //! # at9codec — clean-room ATRAC9 (AT9) codec
 //!
-//! A from-scratch, clean-room implementation of the PlayStation ATRAC9 ("AT9")
-//! audio codec, with **no PlayStation code**. The goal is a small, portable
+//! A from-scratch, clean-room implementation of the ATRAC9 ("AT9")
+//! audio codec, with **no proprietary or decompiled code**. The goal is a small, portable
 //! native library (`.dll`/`.so`/`.dylib`) plus a CLI, so apps can decode and
-//! (eventually) encode AT9 without a Windows-only reference AT9 tool or a bundled
+//! (eventually) encode AT9 without the Windows-only the reference tool or a bundled
 //! Wine.
 //!
 //! ## Status
 //! * **Container parsing** — done ([`container`]): reads `fmt`/`fact`/`smpl`/`data`,
 //!   the ATRAC9 config, true length, encoder delay and loop points.
-//! * **Decode** — in progress ([`decode_to_pcm16`] returns `NotImplemented`).
-//!   Based on the clean-room LibAtrac9/VGAudio reference implementations.
-//! * **Encode** — not started (the hard part: no open ATRAC9 encoder exists).
+//! * **Decode** — done ([`decode_to_pcm16`]); bit-exact vs the reference decoders.
+//! * **Encode** — working ([`encode`]): produces standard-bitrate AT9 that the
+//!   reference the reference tool decodes fully (so it is accepted by hardware decoders).
 //!
 //! ## Clean-room note
 //! Derived from the open, MIT-licensed clean-room references (LibAtrac9 for
 //! decode, VGAudio for encode structure) plus public DSP technique — never from
-//! the reference tool, which is used only as a black-box validation oracle.
+//! the reference the reference tool, which is used only as a black-box validation oracle.
 
 pub mod container;
 pub mod decode;

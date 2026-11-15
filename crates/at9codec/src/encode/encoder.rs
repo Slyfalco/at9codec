@@ -1,6 +1,6 @@
 //! ATRAC9 frame encoder with Huffman coding + bit allocation.
 //!
-//! Targets a standard ATRAC9 bitrate (so the reference tool and the Vita accept
+//! Targets a standard ATRAC9 bitrate (so the reference the reference tool and hardware decoders accept
 //! the output). Strategy, mirroring the reference tool's observed scheme:
 //! * dual-mono block layout (each channel is channel-0 of its block → simple CLC
 //!   scale factors, no joint-stereo Huffman),
@@ -64,7 +64,7 @@ fn scale_factors_from_spectrum(spectra: &[f64; 256], quc: usize) -> [i32; 31] {
 
 /// Highest quant unit with energy → smallest band_count covering it.
 fn choose_band_count(spectra: &[f64; 256], sri: usize) -> usize {
-    // the reference tool never emits the top band (18); cap at 16 to match what the reference tool emits.
+    // the reference tool never emits the top band (18); cap at 16 to match the reference encoder.
     let max_band = (MAX_BAND_COUNT[sri] as usize).min(16);
     let min_band = MIN_BAND_COUNT[0] as usize;
     let max_quc = BAND_TO_QUANT_UNIT_COUNT[max_band] as usize;
@@ -230,16 +230,26 @@ fn clamp_signed(v: i64, bits: i32) -> i32 {
 fn plan_block(
     spectra: &[f64; 256],
     gsv: i32,
+    gb: i32,
+    boost: i32,
+    band_override: Option<usize>,
     sri: usize,
     curves: &[[u8; 48]; 48],
 ) -> BlockPlan {
-    let band_count = choose_band_count(spectra, sri);
+    let band_count = band_override.unwrap_or_else(|| choose_band_count(spectra, sri));
     let quc = BAND_TO_QUANT_UNIT_COUNT[band_count] as usize;
-    let sf = scale_factors_from_spectrum(spectra, quc);
+    let mut sf = scale_factors_from_spectrum(spectra, quc);
+    // `boost` raises scale factors uniformly to grow the frame (more precision =
+    // more bits), used by the exact-fill search — harmless on quiet units.
+    if boost > 0 {
+        for s in sf.iter_mut().take(quc) {
+            *s = (*s + boost).min(31);
+        }
+    }
 
     // Gradient mode 2 curve near the top band; boundary lifts the low units.
     let gsu = ((quc as i32) - 1).clamp(1, 30);
-    let gb = (quc as i32).min(15);
+    let gb = gb.clamp(0, (quc as i32).min(15));
     let gradient = create_gradient(gsu, gsv, quc, curves);
     let mask = calc_mask(&sf, quc);
     let (precisions, precisions_fine) = calc_precisions(&sf, &mask, &gradient, gb, quc);
@@ -313,8 +323,16 @@ fn pack_scale_factors_vlc(w: &mut BitWriter, sf: &[i32; 31], ext_unit: usize, hu
     }
 }
 
-/// Pack a planned mono block into `w`.
-fn pack_block(w: &mut BitWriter, plan: &BlockPlan, first_in_superframe: bool, huff: &HuffmanTables) {
+/// Pack a planned mono block into `w`. `filler_bits` (0..=31), when Some, emits a
+/// has-extension-data section the decoder skips — used to pad a block to an exact
+/// byte count so superframes fill exactly (the reference decoder reads frames continuously).
+fn pack_block(
+    w: &mut BitWriter,
+    plan: &BlockPlan,
+    first_in_superframe: bool,
+    huff: &HuffmanTables,
+    filler_bits: Option<u32>,
+) {
     let min_band_count = MIN_BAND_COUNT[0] as u32;
     let max_huff = MAX_HUFF_PRECISION[0] as i32;
     let quc = plan.quant_unit_count;
@@ -332,8 +350,18 @@ fn pack_block(w: &mut BitWriter, plan: &BlockPlan, first_in_superframe: bool, hu
     w.write(plan.grad_start_value as u32, 5); // start value
     w.write(plan.grad_boundary as u32, 4); // boundary
 
-    // Extension params: none.
-    w.write(0, 1); // HasExtensionData
+    // Extension params: optional skippable filler (band extension disabled).
+    match filler_bits {
+        Some(n) => {
+            w.write(1, 1); // HasExtensionData
+            w.write(0, 2); // bex mode (ignored; band extension disabled)
+            w.write(n, 5); // bex data length (bits to skip)
+            for _ in 0..n {
+                w.write(0, 1);
+            }
+        }
+        None => w.write(0, 1), // HasExtensionData = 0
+    }
 
     // Scale factors via VLC delta-offset (coding mode 0), as the reference tool uses.
     pack_scale_factors_vlc(w, &plan.scale_factors, quc, huff);
@@ -373,6 +401,63 @@ fn pack_block(w: &mut BitWriter, plan: &BlockPlan, first_in_superframe: bool, hu
 
 /// Encode one frame (all channels) to bytes, searching the gradient for the best
 /// quality that fits `frame_bytes`.
+fn pack_block_to_vec(
+    plan: &BlockPlan,
+    first: bool,
+    huff: &HuffmanTables,
+    filler: Option<u32>,
+) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    pack_block(&mut w, plan, first, huff, filler);
+    w.into_bytes()
+}
+
+/// Pack one block to EXACTLY `target_bytes`, best quality first. Searches the
+/// gradient start-value and boundary for the largest size <= target, then pads
+/// with skippable filler (0..31 bits) to hit the exact byte count. Falls back to
+/// coding the full band (and finally a scale-factor boost) so that even quiet /
+/// silent frames can reach the target. None if truly unreachable.
+fn pack_block_exact(
+    spectra: &[f64; 256],
+    first: bool,
+    sri: usize,
+    curves: &[[u8; 48]; 48],
+    huff: &HuffmanTables,
+    target_bytes: usize,
+) -> Option<Vec<u8>> {
+    let natural = choose_band_count(spectra, sri);
+    let max_band = (MAX_BAND_COUNT[sri] as usize).min(16);
+    // Try the natural band first (best quality); widen the band, then boost scale
+    // factors, only as needed to make quiet frames large enough to fill.
+    let mut attempts: Vec<(usize, i32)> = vec![(natural, 0)];
+    if max_band != natural {
+        attempts.push((max_band, 0));
+    }
+    for b in 1..=24 {
+        attempts.push((max_band, b)); // scale-factor boost for near-silent frames
+    }
+
+    for (band, boost) in attempts {
+        for gsv in 0..=31i32 {
+            for &gb in &[15i32, 12, 8, 4, 0] {
+                let plan = plan_block(spectra, gsv, gb, boost, Some(band), sri, curves);
+                if pack_block_to_vec(&plan, first, huff, None).len() > target_bytes {
+                    continue;
+                }
+                for n in 0..=31u32 {
+                    let v = pack_block_to_vec(&plan, first, huff, Some(n));
+                    match v.len().cmp(&target_bytes) {
+                        std::cmp::Ordering::Equal => return Some(v),
+                        std::cmp::Ordering::Greater => break,
+                        std::cmp::Ordering::Less => {}
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn encode_frame(
     frame_spectra: &[[f64; 256]],
     first: bool,
@@ -381,23 +466,41 @@ fn encode_frame(
     huff: &HuffmanTables,
     curves: &[[u8; 48]; 48],
 ) -> Vec<u8> {
-    // Search the gradient start-value: pick the lowest (best quality) that fits.
-    let mut best: Option<Vec<u8>> = None;
-    for gsv in 0..=31i32 {
-        let mut w = BitWriter::new();
-        for spectra in frame_spectra {
-            let plan = plan_block(spectra, gsv, sri, curves);
-            pack_block(&mut w, &plan, first, huff);
+    // Each frame must be EXACTLY frame_bytes so superframes fill without gaps
+    // (the reference decoder reads frames continuously and rejects trailing padding).
+    if frame_spectra.len() == 1 {
+        if let Some(v) = pack_block_exact(&frame_spectra[0], first, sri, curves, huff, frame_bytes) {
+            return v;
         }
-        let bytes = w.into_bytes();
-        if bytes.len() <= frame_bytes {
-            return bytes;
-        }
-        if gsv == 31 {
-            best = Some(bytes); // worst case: take the smallest we can make
-        }
+        // Fallback (rare): smallest frame we can make, padded to frame_bytes.
+        let plan = plan_block(&frame_spectra[0], 31, 0, 0, None, sri, curves);
+        let mut v = pack_block_to_vec(&plan, first, huff, None);
+        v.resize(frame_bytes, 0);
+        return v;
     }
-    best.unwrap()
+
+    // Dual-mono (2 blocks): block 0 takes ~half, block 1 exact-fills the rest.
+    let half = frame_bytes / 2;
+    let b0 = pack_block_exact(&frame_spectra[0], first, sri, curves, huff, half)
+        .unwrap_or_else(|| {
+            let p = plan_block(&frame_spectra[0], 31, 0, 0, None, sri, curves);
+            let mut v = pack_block_to_vec(&p, first, huff, None);
+            v.resize(half, 0);
+            v
+        });
+    let rest = frame_bytes - b0.len();
+    let b1 = pack_block_exact(&frame_spectra[1], first, sri, curves, huff, rest)
+        .unwrap_or_else(|| {
+            let p = plan_block(&frame_spectra[1], 31, 0, 0, None, sri, curves);
+            let mut v = pack_block_to_vec(&p, first, huff, None);
+            v.resize(rest, 0);
+            v
+        });
+    // Blocks are bit-packed, but each ends byte-aligned, so concatenating the
+    // byte buffers reproduces the continuous bitstream.
+    let mut out = b0;
+    out.extend_from_slice(&b1);
+    out
 }
 
 /// Encode 16-bit PCM to a complete AT9 file at a standard bitrate.

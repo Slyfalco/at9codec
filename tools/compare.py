@@ -4,7 +4,7 @@
 Compares our decoder's output against the reference decoders, which is how we
 know the clean-room codec is correct:
 
-  * the reference tool -repeat 1  -> the ground truth (the reference tool's own decoder, true length)
+  * the reference tool -repeat 1  -> the ground truth (the reference decoder, true length)
   * the reference encoder.exe         -> cross-check (clean-room C#, true length)
   * ffmpeg                 -> cross-check (native ATRAC9, trimmed to true length)
 
