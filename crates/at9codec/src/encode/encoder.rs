@@ -432,8 +432,9 @@ fn pack_block_to_vec(
 }
 
 /// Block bit length before the final byte-align, with the given filler.
+/// Uses a counting writer (no buffer) so sizing a block is cheap.
 fn block_bits(plan: &BlockPlan, first: bool, huff: &HuffmanTables, filler: Option<u32>) -> usize {
-    let mut w = BitWriter::new();
+    let mut w = BitWriter::counting();
     pack_block(&mut w, plan, first, huff, filler);
     w.bit_pos
 }

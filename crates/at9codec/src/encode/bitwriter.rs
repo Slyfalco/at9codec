@@ -1,11 +1,13 @@
 //! MSB-first bit writer — the inverse of [`crate::decode::bitreader::BitReader`].
 
-/// Accumulates bits MSB-first into a byte buffer.
+/// Accumulates bits MSB-first into a byte buffer. In `count_only` mode it tracks
+/// only the bit length (no buffer) — used to size a block without packing it.
 #[derive(Default)]
 pub struct BitWriter {
     buf: Vec<u8>,
     /// Number of bits written so far.
     pub bit_pos: usize,
+    count_only: bool,
 }
 
 impl BitWriter {
@@ -13,8 +15,17 @@ impl BitWriter {
         Self::default()
     }
 
+    /// A writer that only measures bit length (produces no bytes).
+    pub fn counting() -> Self {
+        Self { count_only: true, ..Self::default() }
+    }
+
     /// Write the low `bits` bits of `value`, MSB first.
     pub fn write(&mut self, value: u32, bits: u32) {
+        if self.count_only {
+            self.bit_pos += bits as usize;
+            return;
+        }
         for i in (0..bits).rev() {
             let bit = (value >> i) & 1;
             let byte_idx = self.bit_pos >> 3;
@@ -47,6 +58,10 @@ impl BitWriter {
         let rem = self.bit_pos % multiple;
         if rem != 0 {
             let pad = multiple - rem;
+            if self.count_only {
+                self.bit_pos += pad;
+                return;
+            }
             for _ in 0..pad {
                 let byte_idx = self.bit_pos >> 3;
                 if byte_idx >= self.buf.len() {

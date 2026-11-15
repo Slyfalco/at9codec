@@ -24,6 +24,16 @@ pub struct Codebook {
     meta: CodebookMeta,
     /// `1 << max_bit_size` entries mapping a peeked code to a value index.
     lookup: Vec<u8>,
+    /// For each symbol index, the nearest *present* symbol (by squared coefficient
+    /// distance). Absent symbols (e.g. all-zero in some codebooks) map to the
+    /// closest encodable one; present symbols map to themselves. Precomputed so
+    /// the encoder's snap is O(1) in the hot path.
+    snap: Vec<u32>,
+}
+
+fn signext(v: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    ((v << shift) as i32) >> shift
 }
 
 impl Codebook {
@@ -42,7 +52,44 @@ impl Codebook {
                 *slot = i as u8;
             }
         }
-        Codebook { meta, lookup }
+
+        // Precompute the nearest present symbol for every symbol index.
+        let n = meta.bits.len();
+        let vc = meta.value_count;
+        let vb = meta.value_bits;
+        let mask = (1u32 << vb) - 1;
+        let coeff = |sym: usize, k: usize| signext((sym as u32 >> (k as u32 * vb)) & mask, vb);
+        let mut snap = vec![0u32; n];
+        for s in 0..n {
+            if meta.bits[s] > 0 {
+                snap[s] = s as u32;
+                continue;
+            }
+            let mut best = 0usize;
+            let mut best_d = i64::MAX;
+            for t in 0..n {
+                if meta.bits[t] == 0 {
+                    continue;
+                }
+                let mut d = 0i64;
+                for k in 0..vc {
+                    let dd = (coeff(s, k) - coeff(t, k)) as i64;
+                    d += dd * dd;
+                }
+                if d < best_d {
+                    best_d = d;
+                    best = t;
+                }
+            }
+            snap[s] = best as u32;
+        }
+
+        Codebook { meta, lookup, snap }
+    }
+
+    /// Nearest present symbol to `symbol` (identity when `symbol` is present).
+    pub fn snap(&self, symbol: usize) -> usize {
+        self.snap.get(symbol).copied().unwrap_or(0) as usize
     }
 
     pub fn value_count(&self) -> usize {

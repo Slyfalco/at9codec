@@ -25,44 +25,12 @@ fn symbol_at(cb: &Codebook, coeffs: &[i32], off: usize) -> usize {
     symbol as usize
 }
 
-fn sign_extend(v: u32, bits: u32) -> i32 {
-    let shift = 32 - bits;
-    ((v << shift) as i32) >> shift
-}
-
-/// Coefficient `k` of a symbol (sign-extended to `value_bits`).
-fn symbol_coeff(cb: &Codebook, symbol: usize, k: usize) -> i32 {
-    let vb = cb.value_bits();
-    sign_extend((symbol as u32 >> (k as u32 * vb)) & (mask(vb) as u32), vb)
-}
-
-/// The valid codebook symbol closest (least squared coefficient error) to the
-/// quantized group. Codebooks omit some symbols (e.g. all-zero in A21), so the
-/// encoder snaps to the nearest representable one — a negligible error at low
-/// precision, exactly as the reference tool does. Returns the chosen symbol.
+/// The valid codebook symbol closest to the quantized group. Codebooks omit some
+/// symbols (e.g. all-zero in some books), so the encoder snaps to the nearest
+/// representable one — a negligible error at low precision. Uses the codebook's
+/// precomputed nearest-symbol table for O(1) lookup.
 pub fn best_symbol(cb: &Codebook, coeffs: &[i32], off: usize) -> usize {
-    let target = symbol_at(cb, coeffs, off);
-    if cb.symbol_len(target) > 0 {
-        return target;
-    }
-    let vc = cb.value_count();
-    let mut best = 0usize;
-    let mut best_err = i64::MAX;
-    for s in 0..cb.len() {
-        if cb.symbol_len(s) == 0 {
-            continue;
-        }
-        let mut err = 0i64;
-        for k in 0..vc {
-            let d = (coeffs[off + k] - symbol_coeff(cb, s, k)) as i64;
-            err += d * d;
-        }
-        if err < best_err {
-            best_err = err;
-            best = s;
-        }
-    }
-    best
+    cb.snap(symbol_at(cb, coeffs, off))
 }
 
 /// True if every group of `coeffs` has a code in this codebook.
