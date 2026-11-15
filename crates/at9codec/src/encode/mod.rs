@@ -140,7 +140,8 @@ pub fn build_at9_container(
     fmt.extend_from_slice(&0u16.to_le_bytes()); // wBitsPerSample = 0
     fmt.extend_from_slice(&34u16.to_le_bytes()); // cbSize
     fmt.extend_from_slice(&(config.superframe_samples() as u16).to_le_bytes()); // samples/block
-    fmt.extend_from_slice(&3u32.to_le_bytes()); // dwChannelMask (stereo FL+FR; harmless for mono)
+    let channel_mask: u32 = if config.channels == 1 { 0x1 } else { 0x3 }; // FL / FL+FR
+    fmt.extend_from_slice(&channel_mask.to_le_bytes()); // dwChannelMask
     fmt.extend_from_slice(&ATRAC9_GUID);
     fmt.extend_from_slice(&1u32.to_le_bytes()); // version
     fmt.extend_from_slice(&config.config_bytes()); // ATRAC9 config
@@ -152,7 +153,8 @@ pub fn build_at9_container(
     fact.extend_from_slice(&encoder_delay.to_le_bytes());
     fact.extend_from_slice(&encoder_delay.to_le_bytes());
 
-    // smpl: one forward loop in AT9 coords (decoded coord + delay).
+    // smpl: one forward loop in AT9 coords (decoded coord + delay). Only when a
+    // loop is requested (the reference tool's own files omit smpl otherwise).
     let start = loop_start.unwrap_or(0) + encoder_delay;
     let end = total_samples + encoder_delay - 1;
     let mut smpl = Vec::with_capacity(60);
@@ -176,7 +178,9 @@ pub fn build_at9_container(
     let mut body = Vec::new();
     push_chunk(&mut body, b"fmt ", &fmt);
     push_chunk(&mut body, b"fact", &fact);
-    push_chunk(&mut body, b"smpl", &smpl);
+    if loop_start.is_some() {
+        push_chunk(&mut body, b"smpl", &smpl);
+    }
     push_chunk(&mut body, b"data", data);
 
     let mut out = Vec::with_capacity(12 + body.len());

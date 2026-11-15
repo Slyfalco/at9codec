@@ -57,6 +57,13 @@ impl Codebook {
     pub fn value_bits(&self) -> u32 {
         self.meta.value_bits
     }
+    /// Number of symbols in this codebook.
+    pub fn len(&self) -> usize {
+        self.meta.bits.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.meta.bits.is_empty()
+    }
     /// Code bit-length for a symbol index (0 = not present in this codebook).
     pub fn symbol_len(&self, symbol: usize) -> u32 {
         self.meta.bits.get(symbol).copied().unwrap_or(0) as u32
