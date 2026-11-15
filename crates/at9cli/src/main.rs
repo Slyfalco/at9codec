@@ -13,6 +13,7 @@ fn usage() {
          USAGE:\n  \
          at9 info   <in.at9>            Print container metadata\n  \
          at9 decode <in.at9> <out.wav>  Decode AT9 to 16-bit PCM WAV\n  \
+         at9 encode <in.wav> <out.at9>  Encode 16-bit PCM WAV to AT9\n  \
          at9 --version",
         at9codec::VERSION
     );
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
         }
         Some("info") if args.len() == 2 => cmd_info(&args[1]),
         Some("decode") if args.len() == 3 => cmd_decode(&args[1], &args[2]),
+        Some("encode") if args.len() == 3 => cmd_encode(&args[1], &args[2]),
         _ => {
             usage();
             ExitCode::FAILURE
@@ -88,6 +90,30 @@ fn cmd_info(path: &str) -> ExitCode {
     }
     println!("data            : offset={} len={}", c.data_offset, c.data_len);
     ExitCode::SUCCESS
+}
+
+fn cmd_encode(input: &str, output: &str) -> ExitCode {
+    let buf = match std::fs::read(input) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: cannot read {input}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match at9codec::encode::encode_wav(&buf, 0) {
+        Ok(at9) => {
+            if let Err(e) = std::fs::write(output, &at9) {
+                eprintln!("error: writing {output}: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!("encoded {} bytes -> {output}", at9.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn cmd_decode(input: &str, output: &str) -> ExitCode {

@@ -12,7 +12,14 @@
 //! Still to build: the per-frame encode pipeline and rate control.
 
 pub mod bitwriter;
+pub mod encoder;
 pub mod wavread;
+
+/// Encode a 16-bit PCM WAV buffer to a complete AT9 file.
+pub fn encode_wav(wav_buf: &[u8], bitrate: u32) -> Result<Vec<u8>> {
+    let pcm = wavread::parse_wav(wav_buf)?;
+    encoder::encode_to_at9(&pcm, bitrate)
+}
 
 use crate::decode::tables::{
     CHANNEL_CONFIGS, SAMPLE_RATES, SAMPLING_RATE_INDEX_TO_FRAME_SAMPLES_POWER,
