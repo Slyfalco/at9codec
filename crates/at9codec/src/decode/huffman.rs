@@ -54,6 +54,17 @@ impl Codebook {
     pub fn value_max(&self) -> i32 {
         self.meta.value_max
     }
+    pub fn value_bits(&self) -> u32 {
+        self.meta.value_bits
+    }
+    /// Code bit-length for a symbol index (0 = not present in this codebook).
+    pub fn symbol_len(&self, symbol: usize) -> u32 {
+        self.meta.bits.get(symbol).copied().unwrap_or(0) as u32
+    }
+    /// Huffman code for a symbol index.
+    pub fn symbol_code(&self, symbol: usize) -> u32 {
+        self.meta.codes.get(symbol).copied().unwrap_or(0) as u32
+    }
 
     /// Read one Huffman-coded value, advancing the bit reader.
     pub fn read_value(&self, br: &mut BitReader, is_signed: bool) -> i32 {

@@ -13,6 +13,7 @@
 
 pub mod bitwriter;
 pub mod encoder;
+pub mod huffenc;
 pub mod wavread;
 
 /// Encode a 16-bit PCM WAV buffer to a complete AT9 file.
