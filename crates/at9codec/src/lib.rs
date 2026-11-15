@@ -19,6 +19,7 @@
 //! the reference tool, which is used only as a black-box validation oracle.
 
 pub mod container;
+pub mod decode;
 pub mod error;
 pub mod wav;
 

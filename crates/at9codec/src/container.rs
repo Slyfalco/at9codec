@@ -303,6 +303,13 @@ pub fn parse(buf: &[u8]) -> Result<Container> {
     })
 }
 
+/// Test-only: build an [`Atrac9Config`] from raw config bytes (superframe
+/// samples fixed at 1024, as in the real 48 kHz files).
+#[cfg(test)]
+pub(crate) fn parse_config_for_test(raw: [u8; 4]) -> Atrac9Config {
+    parse_config(raw, 1024).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
