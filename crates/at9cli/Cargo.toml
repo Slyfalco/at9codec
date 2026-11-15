@@ -1,0 +1,15 @@
+[package]
+name = "at9cli"
+description = "Command-line wrapper for the at9codec ATRAC9 decoder/encoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "at9"
+path = "src/main.rs"
+
+[dependencies]
+at9codec = { path = "../at9codec" }

@@ -1,0 +1,16 @@
+[package]
+name = "at9codec"
+description = "Clean-room ATRAC9 (AT9) decoder/encoder library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# rlib for the CLI crate; cdylib for the shippable .dll/.so/.dylib with a C ABI.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Intentionally none: the core codec is pure Rust with no dependencies, so the
+# cdylib stays tiny and trivially portable/cross-compilable.

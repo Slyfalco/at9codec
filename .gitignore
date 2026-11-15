@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Clean-room reference sources (LibAtrac9, VGAudio) are read for analysis only;
+# never committed or distributed from this repo.
+/reference/
+
+# Local test material and harness scratch output.
+/testdata/
+/harness-out/
+*.wav
