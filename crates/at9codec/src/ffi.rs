@@ -1,8 +1,9 @@
 //! C ABI surface for the `cdylib` (`.dll`/`.so`/`.dylib`).
 //!
-//! Kept deliberately small and `#[no_mangle] extern "C"` so any language can bind
-//! it. Decode/encode entry points are added here as those land; for now it
-//! exposes the version and container-info parsing.
+//! All functions are `#[no_mangle] extern "C"` so any language can bind them.
+//! Buffers returned by the library are heap-allocated here and must be released
+//! with the matching `at9_free_*` function (do not free them with the caller's
+//! allocator). See `include/at9codec.h` and `docs/USING_THE_LIBRARY.md`.
 
 use crate::container;
 use std::os::raw::c_char;
@@ -11,6 +12,20 @@ use std::os::raw::c_char;
 pub const AT9_OK: i32 = 0;
 pub const AT9_ERR_NULL: i32 = -1;
 pub const AT9_ERR_PARSE: i32 = -2;
+pub const AT9_ERR_DECODE: i32 = -3;
+pub const AT9_ERR_ENCODE: i32 = -4;
+
+fn leak_u8(v: Vec<u8>) -> (*mut u8, usize) {
+    let b = v.into_boxed_slice();
+    let len = b.len();
+    (Box::into_raw(b) as *mut u8, len)
+}
+
+fn leak_i16(v: Vec<i16>) -> (*mut i16, usize) {
+    let b = v.into_boxed_slice();
+    let len = b.len();
+    (Box::into_raw(b) as *mut i16, len)
+}
 
 /// Container metadata, C-layout. Mirrors [`crate::container::Container`]'s
 /// scalar fields (loop presence is flattened for a flat ABI).
@@ -78,5 +93,130 @@ pub unsafe extern "C" fn at9_parse_info(
             AT9_OK
         }
         Err(_) => AT9_ERR_PARSE,
+    }
+}
+
+/// Decode an AT9 file to interleaved 16-bit PCM.
+///
+/// On success writes an allocated sample buffer to `*out_pcm`, its length (number
+/// of `int16_t` samples, i.e. frames × channels) to `*out_count`, and the format
+/// to `*out_channels` / `*out_sample_rate`, and returns [`AT9_OK`]. Release the
+/// buffer with [`at9_free_pcm`].
+///
+/// # Safety
+/// `at9` must point to `at9_len` readable bytes; the `out_*` pointers must be
+/// valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn at9_decode(
+    at9: *const u8,
+    at9_len: usize,
+    out_pcm: *mut *mut i16,
+    out_count: *mut usize,
+    out_channels: *mut u16,
+    out_sample_rate: *mut u32,
+) -> i32 {
+    if at9.is_null() || out_pcm.is_null() || out_count.is_null()
+        || out_channels.is_null() || out_sample_rate.is_null()
+    {
+        return AT9_ERR_NULL;
+    }
+    let buf = std::slice::from_raw_parts(at9, at9_len);
+    match crate::decode_to_pcm16(buf) {
+        Ok(pcm) => {
+            *out_channels = pcm.channels;
+            *out_sample_rate = pcm.sample_rate;
+            let (ptr, len) = leak_i16(pcm.samples);
+            *out_pcm = ptr;
+            *out_count = len;
+            AT9_OK
+        }
+        Err(_) => AT9_ERR_DECODE,
+    }
+}
+
+/// Free a PCM buffer returned by [`at9_decode`]. `count` must be the value
+/// written to `out_count`.
+///
+/// # Safety
+/// `pcm`/`count` must be exactly what [`at9_decode`] returned (or `pcm` null).
+#[no_mangle]
+pub unsafe extern "C" fn at9_free_pcm(pcm: *mut i16, count: usize) {
+    if !pcm.is_null() {
+        drop(Box::from_raw(std::slice::from_raw_parts_mut(pcm, count)));
+    }
+}
+
+/// Encode interleaved 16-bit PCM to an AT9 file (RIFF/WAVE). `bitrate` is in
+/// bits/sec (0 = a sensible default for the channel count).
+///
+/// On success writes an allocated AT9 byte buffer to `*out_at9` and its length to
+/// `*out_len`, and returns [`AT9_OK`]. Release the buffer with [`at9_free_at9`].
+///
+/// # Safety
+/// `pcm` must point to `sample_count` readable `int16_t`s; the `out_*` pointers
+/// must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn at9_encode(
+    pcm: *const i16,
+    sample_count: usize,
+    channels: u16,
+    sample_rate: u32,
+    bitrate: u32,
+    out_at9: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if pcm.is_null() || out_at9.is_null() || out_len.is_null() {
+        return AT9_ERR_NULL;
+    }
+    let samples = std::slice::from_raw_parts(pcm, sample_count);
+    match crate::encode::encode_pcm16(samples, channels, sample_rate, bitrate) {
+        Ok(bytes) => {
+            let (ptr, len) = leak_u8(bytes);
+            *out_at9 = ptr;
+            *out_len = len;
+            AT9_OK
+        }
+        Err(_) => AT9_ERR_ENCODE,
+    }
+}
+
+/// Encode a 16-bit PCM WAV file buffer to an AT9 file. Convenience over
+/// [`at9_encode`] when you already have a WAV container (8/16/24/32-bit int or
+/// 32/64-bit float input is accepted and converted to 16-bit internally).
+///
+/// # Safety
+/// `wav` must point to `wav_len` readable bytes; `out_*` must be valid/writable.
+#[no_mangle]
+pub unsafe extern "C" fn at9_encode_wav(
+    wav: *const u8,
+    wav_len: usize,
+    bitrate: u32,
+    out_at9: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if wav.is_null() || out_at9.is_null() || out_len.is_null() {
+        return AT9_ERR_NULL;
+    }
+    let buf = std::slice::from_raw_parts(wav, wav_len);
+    match crate::encode::encode_wav(buf, bitrate) {
+        Ok(bytes) => {
+            let (ptr, len) = leak_u8(bytes);
+            *out_at9 = ptr;
+            *out_len = len;
+            AT9_OK
+        }
+        Err(_) => AT9_ERR_ENCODE,
+    }
+}
+
+/// Free an AT9 byte buffer returned by [`at9_encode`] / [`at9_encode_wav`].
+/// `len` must be the value written to `out_len`.
+///
+/// # Safety
+/// `at9`/`len` must be exactly what the encode function returned (or `at9` null).
+#[no_mangle]
+pub unsafe extern "C" fn at9_free_at9(at9: *mut u8, len: usize) {
+    if !at9.is_null() {
+        drop(Box::from_raw(std::slice::from_raw_parts_mut(at9, len)));
     }
 }

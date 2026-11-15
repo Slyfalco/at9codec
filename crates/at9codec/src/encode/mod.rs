@@ -16,9 +16,26 @@ pub mod encoder;
 pub mod huffenc;
 pub mod wavread;
 
-/// Encode a 16-bit PCM WAV buffer to a complete AT9 file.
+/// Encode a 16-bit PCM WAV buffer to a complete AT9 file. `bitrate` in bits/sec
+/// (0 = a sensible default for the channel count).
 pub fn encode_wav(wav_buf: &[u8], bitrate: u32) -> Result<Vec<u8>> {
     let pcm = wavread::parse_wav(wav_buf)?;
+    encoder::encode_to_at9(&pcm, bitrate)
+}
+
+/// Encode interleaved 16-bit PCM samples to a complete AT9 file. `bitrate` in
+/// bits/sec (0 = a sensible default).
+pub fn encode_pcm16(
+    samples: &[i16],
+    channels: u16,
+    sample_rate: u32,
+    bitrate: u32,
+) -> Result<Vec<u8>> {
+    let pcm = wavread::WavPcm {
+        channels,
+        sample_rate,
+        samples: samples.to_vec(),
+    };
     encoder::encode_to_at9(&pcm, bitrate)
 }
 
