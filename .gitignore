@@ -10,3 +10,7 @@ Cargo.lock.bak
 /testdata/
 /harness-out/
 *.wav
+
+# Reference decoders used only to validate the harness — never redistribute.
+the reference tool
+the reference encoder.exe

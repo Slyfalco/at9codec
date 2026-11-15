@@ -8,7 +8,11 @@
 //! dequantization, scale factors, intensity stereo and band extension. Those
 //! turn [`crate::decode_to_pcm16`] from a stub into a working decoder.
 
+pub mod bex;
 pub mod bitreader;
+pub mod decoder;
+pub mod huffman;
+pub mod huffman_tables;
 pub mod mdct;
 pub mod tables;
 
@@ -69,6 +73,49 @@ impl DecoderConfig {
     pub fn mdct_tables(&self) -> mdct::MdctTables {
         mdct::MdctTables::new(self.frame_samples_power)
     }
+}
+
+/// Decode a parsed AT9 container to interleaved 16-bit PCM, stripping the encoder
+/// delay and trimming to the true length (so output matches the reference tool/VGAudio).
+pub fn decode_container(container: &crate::container::Container, buf: &[u8]) -> Result<crate::Pcm> {
+    let config = DecoderConfig::new(&container.config)?;
+    if config.superframe_bytes == 0 {
+        return Err(Error::BadConfig);
+    }
+    let frames_per_superframe = config.frames_per_superframe;
+    let superframe_bytes = config.superframe_bytes;
+    let channel_count = config.channel_count;
+    let sample_rate = config.sample_rate;
+    let mut decoder = decoder::Decoder::new(config);
+
+    let data = container.data(buf);
+    let superframe_count = data.len() / superframe_bytes;
+    // Raw decoded samples (interleaved), including the priming at the front.
+    let mut raw: Vec<i16> = Vec::with_capacity(superframe_count * superframe_bytes);
+    for sf in 0..superframe_count {
+        let base = sf * superframe_bytes;
+        let sf_slice = &data[base..base + superframe_bytes];
+        let mut off = 0usize;
+        for _ in 0..frames_per_superframe {
+            let mut br = bitreader::BitReader::new(&sf_slice[off..]);
+            decoder.decode_frame(&mut br, &mut raw)?;
+            off += br.pos.div_ceil(8);
+        }
+    }
+
+    // Extract [encoder_delay, encoder_delay + total_samples) per channel, matching
+    // how the reference tool/VGAudio present the true, un-looped audio.
+    let delay = container.encoder_delay as usize;
+    let total = container.total_samples as usize;
+    let start = (delay * channel_count).min(raw.len());
+    let end = (start + total * channel_count).min(raw.len());
+    let samples = raw[start..end].to_vec();
+
+    Ok(crate::Pcm {
+        channels: channel_count as u16,
+        sample_rate,
+        samples,
+    })
 }
 
 #[cfg(test)]

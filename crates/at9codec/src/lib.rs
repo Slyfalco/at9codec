@@ -56,11 +56,9 @@ impl Pcm {
     }
 }
 
-/// Decode an AT9 file buffer to interleaved 16-bit PCM, trimmed to the true
-/// (un-looped) length from the `fact` chunk.
-///
-/// Not yet implemented — the ATRAC9 decode core is under construction.
+/// Decode an AT9 file buffer to interleaved 16-bit PCM, stripping the encoder
+/// delay and trimming to the true (un-looped) length from the `fact` chunk.
 pub fn decode_to_pcm16(buf: &[u8]) -> Result<Pcm> {
-    let _container = parse(buf)?;
-    Err(Error::NotImplemented("ATRAC9 decode"))
+    let container = parse(buf)?;
+    decode::decode_container(&container, buf)
 }

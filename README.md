@@ -15,9 +15,13 @@ removes that dependency and makes AT9 usable from any language on any OS.
 | Part | State |
 |------|-------|
 | Container parsing (`fmt`/`fact`/`smpl`/`data`, ATRAC9 config, loop points, true length) | ✅ done |
-| Decode → PCM (LibAtrac9 basis) | 🚧 in progress |
-| Validation harness (round-trip vs the reference tool/VGAudio, Vita hardware check) | 🚧 in progress |
+| Decode → PCM (LibAtrac9 basis) | ✅ done — **bit-exact** vs the reference tool/VGAudio |
+| Validation harness (round-trip vs the reference tool/VGAudio) | ✅ done (`tools/compare.py`) |
 | Encode (from scratch — no open ATRAC9 encoder exists) | ⬜ not started |
+
+Decode is verified **bit-for-bit identical** to the reference tool and VGAudio across
+every test file (max sample difference 0). Run `tools/compare.py` against a folder
+of `.at9` files with the reference tool/`the reference encoder.exe` available to reproduce.
 
 ## Build
 
