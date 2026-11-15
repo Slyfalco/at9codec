@@ -78,6 +78,32 @@ impl MdctTables {
         }
     }
 
+    /// Forward MDCT for one frame (inverse of [`run_imdct`]; used by the encoder).
+    /// `prev` is the per-channel analysis overlap buffer, `input` the `frame_size`
+    /// PCM samples, `output` receives `frame_size` spectral coefficients (already
+    /// multiplied by `scale`). Mirrors VGAudio's `Mdct.RunMdct`.
+    pub fn run_mdct(&self, prev: &mut [f64], input: &[f64], output: &mut [f64], scale: f64) {
+        let size = 1usize << self.bits;
+        let half = size / 2;
+        // Analysis uses the plain sine window; the IMDCT's compensated window is
+        // the biorthogonal synthesis partner (LibAtrac9 splits them this way).
+        let w = &self.mdct_window;
+        let mut dct_in = [0.0f64; MAX_FRAME_SAMPLES];
+        for i in 0..half {
+            let a = w[half - i - 1] * -input[half + i];
+            let b = w[half + i] * input[half - i - 1];
+            let c = w[i] * prev[i];
+            let d = w[size - i - 1] * prev[size - i - 1];
+            dct_in[i] = a - b;
+            dct_in[half + i] = c - d;
+        }
+        self.dct4(&dct_in, output);
+        for v in output[..size].iter_mut() {
+            *v *= scale;
+        }
+        prev[..size].copy_from_slice(&input[..size]);
+    }
+
     /// Fast DCT-IV (LibAtrac9 factorization).
     fn dct4(&self, input: &[f64], output: &mut [f64]) {
         let mdct_bits = self.bits as usize;
@@ -183,5 +209,72 @@ mod tests {
         for i in 0..256 {
             assert!(t.imdct_window[i].is_finite());
         }
+    }
+
+    #[test]
+    fn mdct_imdct_round_trips() {
+        // Forward MDCT then IMDCT must reconstruct the input (delayed one frame),
+        // which confirms the forward transform and fixes the encoder scale.
+        let size = 256usize;
+        let t = MdctTables::new(8);
+        let frames = 6;
+        let input: Vec<[f64; 256]> = (0..frames)
+            .map(|f| {
+                let mut a = [0.0; 256];
+                for (i, v) in a.iter_mut().enumerate() {
+                    let n = (f * size + i) as f64;
+                    *v = (n * 0.017).sin() * 0.5 + (n * 0.0031).sin() * 0.3;
+                }
+                a
+            })
+            .collect();
+
+        // Forward (scale 1.0), collecting spectra.
+        let mut mprev = [0.0f64; 256];
+        let spectra: Vec<[f64; 256]> = input
+            .iter()
+            .map(|frame| {
+                let mut out = [0.0; 256];
+                t.run_mdct(&mut mprev, frame, &mut out, 1.0);
+                out
+            })
+            .collect();
+
+        // Inverse, collecting reconstructed PCM.
+        let mut iprev = [0.0f64; 256];
+        let recon: Vec<[f64; 256]> = spectra
+            .iter()
+            .map(|sp| {
+                let mut out = [0.0; 256];
+                t.run_imdct(&mut iprev, sp, &mut out);
+                out
+            })
+            .collect();
+
+        // Steady-state: recon[frame] == scale * input[frame-1].
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for f in 2..frames {
+            for i in 0..size {
+                num += input[f - 1][i] * recon[f][i];
+                den += recon[f][i] * recon[f][i];
+            }
+        }
+        let scale = num / den;
+        // With that scale, reconstruction error must be tiny (perfect reconstruction).
+        let mut err = 0.0;
+        let mut energy = 0.0;
+        for f in 2..frames {
+            for i in 0..size {
+                let d = input[f - 1][i] - scale * recon[f][i];
+                err += d * d;
+                energy += input[f - 1][i] * input[f - 1][i];
+            }
+        }
+        let rel = (err / energy).sqrt();
+        assert!(rel < 1e-9, "reconstruction rel error {rel} too high; scale={scale}");
+        // The scale we must apply in the forward MDCT so MDCT∘IMDCT == identity.
+        // (2/size == 0.0078125 for size 256.)
+        assert!((scale - 2.0 / size as f64).abs() < 1e-9, "scale={scale}");
     }
 }

@@ -23,6 +23,7 @@ fn round16(x: f64) -> i16 {
 
 #[derive(Clone)]
 struct Channel {
+    #[allow(dead_code)] // kept for parity with LibAtrac9's Channel.ChannelIndex
     channel_index: usize,
     coded_quant_units: usize,
     scale_factor_coding_mode: i32,
