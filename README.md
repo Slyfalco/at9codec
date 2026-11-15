@@ -35,7 +35,7 @@ cargo build --release
 
 ```sh
 at9 info   input.at9             # print container metadata
-at9 decode input.at9 out.wav     # decode to 16-bit PCM WAV (once implemented)
+at9 decode input.at9 out.wav     # decode to 16-bit PCM WAV
 ```
 
 ## Workspace layout
@@ -56,7 +56,7 @@ Derived from the open, MIT-licensed clean-room references
 [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9) (decode) and
 [VGAudio](https://github.com/Thealexbarney/VGAudio) (encode structure), plus
 public DSP technique. The reference the reference tool is used **only as a black-box validation
-oracle** (known inputs → inspect outputs) — never decompiled into shipped code.
+oracle** (known inputs → inspect outputs) — never decompiled, touched or changed.
 
 ## License
 
