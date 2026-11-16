@@ -3,7 +3,7 @@
 //! A from-scratch, clean-room implementation of the ATRAC9 ("AT9")
 //! audio codec, with **no proprietary or decompiled code**. The goal is a small, portable
 //! native library (`.dll`/`.so`/`.dylib`) plus a CLI, so apps can decode and
-//! (eventually) encode AT9 without the Windows-only the reference tool or a bundled
+//! encode AT9 without the existing Windows-only command-line tool or a bundled
 //! Wine.
 //!
 //! ## Status
@@ -11,12 +11,12 @@
 //!   the ATRAC9 config, true length, encoder delay and loop points.
 //! * **Decode** — done ([`decode_to_pcm16`]); bit-exact vs the reference decoders.
 //! * **Encode** — working ([`encode`]): produces standard-bitrate AT9 that the
-//!   reference the reference tool decodes fully (so it is accepted by hardware decoders).
+//!   reference tool decodes fully (so it is accepted by hardware decoders).
 //!
 //! ## Clean-room note
 //! Derived from the open, MIT-licensed clean-room references (LibAtrac9 for
 //! decode, VGAudio for encode structure) plus public DSP technique — never from
-//! the reference the reference tool, which is used only as a black-box validation oracle.
+//! the reference tool, which is used only as a black-box validation oracle.
 
 pub mod container;
 pub mod decode;

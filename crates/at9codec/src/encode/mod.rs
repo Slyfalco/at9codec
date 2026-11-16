@@ -4,7 +4,7 @@
 //! factors → bit allocation → quantization → Huffman/raw packing → RIFF/WAVE AT9.
 //! No open ATRAC9 encoder exists, so the quantization/bit-allocation *decisions*
 //! are built from scratch, validated by round-tripping through our (bit-exact)
-//! decoder and the reference the reference tool.
+//! decoder and the reference tool.
 //!
 //! Landed so far: the forward MDCT ([`crate::decode::mdct::MdctTables::run_mdct`],
 //! verified to round-trip with the IMDCT), the [`bitwriter`], the WAV reader

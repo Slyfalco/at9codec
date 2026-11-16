@@ -1,6 +1,6 @@
 //! ATRAC9 frame encoder with Huffman coding + bit allocation.
 //!
-//! Targets a standard ATRAC9 bitrate (so the reference the reference tool and hardware decoders accept
+//! Targets a standard ATRAC9 bitrate (so the reference tool and hardware decoders accept
 //! the output). Strategy, mirroring the reference tool's observed scheme:
 //! * dual-mono block layout (each channel is channel-0 of its block → simple CLC
 //!   scale factors, no joint-stereo Huffman),

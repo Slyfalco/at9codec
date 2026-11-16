@@ -3,12 +3,12 @@
 A **clean-room** implementation of the **ATRAC9 ("AT9")** audio codec
 in Rust — no proprietary or decompiled code. It builds a small, portable native library
 (`.dll` / `.so` / `.dylib`) plus a CLI (`at9`), so applications can decode and
-(eventually) **encode** AT9 without the Windows-only the reference tool or a bundled
+**encode** AT9 without the existing Windows-only command-line tool or a bundled
 Wine.
 
-Today the only working AT9 encoder is the Windows-only the reference tool, which
-forces non-Windows apps to ship it under Wine. A native, cross-platform codec
-removes that dependency and makes AT9 usable from any language on any OS.
+Until now the only working AT9 encoder was a Windows-only command-line tool,
+which forces non-Windows apps to ship it under Wine. A native, cross-platform
+codec removes that dependency and makes AT9 usable from any language on any OS.
 
 ## Status
 
@@ -72,7 +72,7 @@ reference/          clean-room reference sources, analysis only (git-ignored)
 Derived from the open, MIT-licensed clean-room references
 [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9) (decode) and
 [VGAudio](https://github.com/Thealexbarney/VGAudio) (encode structure), plus
-public DSP technique. The reference the reference tool is used **only as a black-box validation
+public DSP technique. A reference encoder is used **only as a black-box validation
 oracle** (known inputs → inspect outputs) — never decompiled, touched or changed.
 
 ## License
