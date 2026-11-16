@@ -904,16 +904,23 @@ pub fn encode_to_at9_ex(
     let real_frames = samples_per_ch.div_ceil(FRAME_SAMPLES);
     let num_frames = (real_frames + 1).div_ceil(FRAMES_PER_SUPERFRAME) * FRAMES_PER_SUPERFRAME;
 
-    // Choose the frame size (bytes/frame). The Vita only accepts standard AT9
-    // frame sizes — mono 24..=64, stereo 64..=128 bytes at 48 kHz (36–96 kbps
-    // mono, 96–192 kbps stereo). First pick the target size from the bitrate
-    // (0 = highest standard = best quality; explicit = snap DOWN to a standard
-    // size), then, if a `max_bytes` cap is set (e.g. VITA_BGM_MAX_BYTES for
-    // theme BGM), reduce to the highest standard size that fits the cap. Each
+    // Choose the frame size (bytes/frame). The hardware only accepts the standard
+    // AT9 frame sizes the reference the reference tool emits — determined empirically against
+    // the reference tool (any other size is rejected "Not Supported Param"), at 48 kHz:
+    //   mono   24,32,40,48,56,64 bytes    = 36,48,60,72,84,96 kbps
+    //   stereo 48,64,80,96,112,128 bytes  = 72,96,120,144,168,192 kbps
+    // (bitrate = frame_bytes * 1500 at 48 kHz). First pick the target size from
+    // the bitrate (0 = highest standard = best quality; explicit = snap DOWN to a
+    // standard size), then, if a `max_bytes` cap is set (e.g. VITA_BGM_MAX_BYTES
+    // for theme BGM), reduce to the highest standard size that fits the cap. Each
     // frame is filled to exactly frame_bytes, so the size is exact:
     // num_frames * frame_bytes + a small container header.
     const CONTAINER_OVERHEAD: usize = 256;
-    let valid_fb: &[usize] = if channels == 1 { &[24, 32, 40, 48, 64] } else { &[64, 96, 128] };
+    let valid_fb: &[usize] = if channels == 1 {
+        &[24, 32, 40, 48, 56, 64]
+    } else {
+        &[48, 64, 80, 96, 112, 128]
+    };
     let file_size = |fb: usize| num_frames * fb + CONTAINER_OVERHEAD;
     let want_fb = if bitrate == 0 {
         *valid_fb.last().unwrap()
