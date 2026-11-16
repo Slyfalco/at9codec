@@ -846,21 +846,37 @@ fn encode_stereo_frame(
     v
 }
 
-/// Encode 16-bit PCM to a complete AT9 file at a standard bitrate.
+/// PS Vita theme-BGM size limit (under 5 MB): the console won't use a theme AT9
+/// larger than this. Pass as `max_bytes` to [`encode_to_at9_ex`] for Vita theme
+/// background music.
+pub const VITA_BGM_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+/// Tighter 2 MiB cap for a theme BGM that must also work on PS4/PS5 (cross-console
+/// support). Pass as `max_bytes` instead of [`VITA_BGM_MAX_BYTES`] for that case.
+pub const PS_CROSS_BGM_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Encode 16-bit PCM to a complete AT9 file at a standard bitrate (no size cap —
+/// general game AT9, up to the RIFF container's 4 GiB).
 pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
-    encode_to_at9_ex(wav, bitrate, None, None)
+    encode_to_at9_ex(wav, bitrate, None, 0, None)
 }
 
-/// Encode PCM to a complete AT9 file, with optional loop and progress reporting.
+/// Encode PCM to a complete AT9 file, with optional loop, size cap and progress.
 ///
 /// `loop_start`: `None` writes no loop; `Some(0)` loops the whole track; `Some(n)`
-/// loops from sample `n` to the end (in decoded-WAV coordinates). `progress` is
-/// called `(superframes_done, total)` from a monitor thread during the parallel
-/// encode (cheap, never on the worker threads); pass `None` to skip it entirely.
+/// loops from sample `n` to the end (in decoded-WAV coordinates).
+/// `max_bytes`: `0` = no size limit (general AT9, up to the RIFF 4 GiB container);
+/// otherwise the output is kept at or under this many bytes by choosing the
+/// highest standard bitrate that fits — pass [`VITA_BGM_MAX_BYTES`] (or
+/// [`PS_CROSS_BGM_MAX_BYTES`]) for theme BGM. If even the lowest standard
+/// bitrate overflows the cap, the lowest
+/// is used (best effort). `progress` is called `(superframes_done, total)` from a
+/// monitor thread during the parallel encode; pass `None` to skip it.
 pub fn encode_to_at9_ex(
     wav: &WavPcm,
     bitrate: u32,
     loop_start: Option<u32>,
+    max_bytes: usize,
     progress: Option<crate::ProgressFn>,
 ) -> Result<Vec<u8>> {
     if wav.sample_rate == 0 || wav.channels == 0 {
@@ -879,15 +895,6 @@ pub fn encode_to_at9_ex(
         _ => return Err(Error::NotImplemented("only mono/stereo")),
     };
 
-    // Standard bitrate → frame_bytes, clamped to a valid max per channel config
-    // (the reference tool accepts up to 64 bytes/frame for mono, 128 for stereo at 48 kHz).
-    let max_frame_bytes = if channels == 1 { 64 } else { 128 };
-    let default_bitrate = if channels == 1 { 96_000 } else { 192_000 };
-    let bitrate = if bitrate == 0 { default_bitrate } else { bitrate };
-    let frames_per_sec = wav.sample_rate as f64 / FRAME_SAMPLES as f64;
-    let mut frame_bytes = ((bitrate as f64 / 8.0) / frames_per_sec).round() as usize;
-    frame_bytes = frame_bytes.clamp(1, max_frame_bytes);
-
     // De-interleave.
     let samples_per_ch = wav.samples.len() / channels;
     let mut ch_pcm: Vec<Vec<f64>> = vec![Vec::with_capacity(samples_per_ch); channels];
@@ -896,6 +903,35 @@ pub fn encode_to_at9_ex(
     }
     let real_frames = samples_per_ch.div_ceil(FRAME_SAMPLES);
     let num_frames = (real_frames + 1).div_ceil(FRAMES_PER_SUPERFRAME) * FRAMES_PER_SUPERFRAME;
+
+    // Choose the frame size (bytes/frame). The Vita only accepts standard AT9
+    // frame sizes — mono 24..=64, stereo 64..=128 bytes at 48 kHz (36–96 kbps
+    // mono, 96–192 kbps stereo). First pick the target size from the bitrate
+    // (0 = highest standard = best quality; explicit = snap DOWN to a standard
+    // size), then, if a `max_bytes` cap is set (e.g. VITA_BGM_MAX_BYTES for
+    // theme BGM), reduce to the highest standard size that fits the cap. Each
+    // frame is filled to exactly frame_bytes, so the size is exact:
+    // num_frames * frame_bytes + a small container header.
+    const CONTAINER_OVERHEAD: usize = 256;
+    let valid_fb: &[usize] = if channels == 1 { &[24, 32, 40, 48, 64] } else { &[64, 96, 128] };
+    let file_size = |fb: usize| num_frames * fb + CONTAINER_OVERHEAD;
+    let want_fb = if bitrate == 0 {
+        *valid_fb.last().unwrap()
+    } else {
+        let frames_per_sec = wav.sample_rate as f64 / FRAME_SAMPLES as f64;
+        let want = ((bitrate as f64 / 8.0) / frames_per_sec).round() as usize;
+        valid_fb.iter().rev().copied().find(|&fb| fb <= want).unwrap_or(valid_fb[0])
+    };
+    let frame_bytes = if max_bytes > 0 {
+        valid_fb
+            .iter()
+            .rev()
+            .copied()
+            .find(|&fb| fb <= want_fb && file_size(fb) <= max_bytes)
+            .unwrap_or(valid_fb[0])
+    } else {
+        want_fb
+    };
 
     // Forward MDCT per channel → spectra per frame.
     let mdct = MdctTables::new(8);

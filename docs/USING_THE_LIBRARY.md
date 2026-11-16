@@ -69,6 +69,13 @@ coordinates) to the end. The loop is written into the AT9 container's `smpl`
 chunk and read back by `at9_parse_info()` (`has_loop`/`loop_start`/`loop_end`/
 `is_whole_loop`).
 
+They also take a `max_bytes` cap: `0` = no limit (general game AT9, up to the RIFF
+container's 4 GiB), or a byte limit that the encoder keeps the output at or under
+by choosing the highest standard bitrate that fits. Use `AT9_VITA_BGM_MAX_BYTES`
+(~5 MB) for PS Vita theme BGM, or `AT9_PS_CROSS_BGM_MAX_BYTES` (2 MiB) for a theme
+that must also work on PS4/PS5. The Vita refuses oversized theme BGM, so this
+keeps a default-settings encode usable out of the box.
+
 All `_ex` functions also accept an `At9ProgressCb cb` and a `void *user`. The
 callback receives `(user, done, total)` in superframes. During encode it runs on
 one dedicated monitor thread (the encode workers never call it), so it adds no

@@ -17,11 +17,17 @@ removes that dependency and makes AT9 usable from any language on any OS.
 | Container parsing (`fmt`/`fact`/`smpl`/`data`, ATRAC9 config, loop points, true length) | ✅ done |
 | Decode → PCM (LibAtrac9 basis) | ✅ done |
 | Validation harness | ✅ done |
-| Encode (from scratch — no open ATRAC9 encoder exists) | ⬜ Almost complete |
+| Encode (from scratch — no open ATRAC9 encoder exists) | ✅ done |
 
 Decode is verified **bit-for-bit identical** to the AT9 format across
 every test file (max sample difference 0). Run `tools/compare.py` against a folder
 of `.at9` files to reproduce.
+
+Encoded output is accepted by the reference ATRAC9 decoder (whole-track loops and
+exact length preserved), at quality matching it. Encoding supports loop points,
+8/16/24/32-bit integer and 32/64-bit float WAV input (down-converted to 16-bit
+with clean clamping), and an optional output size cap for console theme BGM (see
+the CLI below).
 
 ## Build
 
@@ -36,7 +42,18 @@ cargo build --release
 ```sh
 at9 info   input.at9             # print container metadata
 at9 decode input.at9 out.wav     # decode to 16-bit PCM WAV
+at9 encode input.wav out.at9     # encode 16-bit PCM WAV to AT9 (no size cap)
+at9 encode --vita-system-bgm input.wav out.at9   # cap under 5 MB for PS Vita theme BGM
+at9 encode --ps-cross        input.wav out.at9   # cap at 2 MiB (PS4/PS5 too)
 ```
+
+`--vita-system-bgm` keeps the file under the PS Vita's theme-BGM size limit
+(~5 MB) by auto-selecting the highest standard bitrate that fits, so a
+default-settings encode plays out of the box; `--ps-cross` uses the tighter 2 MiB
+cap for a theme that must also run on PS4/PS5. With no flag there is no cap
+(general game AT9, up to the RIFF container's 4 GiB). The same control is exposed
+to embedders through the library's `max_bytes` argument (see
+`docs/USING_THE_LIBRARY.md`).
 
 ## Workspace layout
 

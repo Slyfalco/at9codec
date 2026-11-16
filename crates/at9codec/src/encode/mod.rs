@@ -23,18 +23,21 @@ pub fn encode_wav(wav_buf: &[u8], bitrate: u32) -> Result<Vec<u8>> {
     encoder::encode_to_at9(&pcm, bitrate)
 }
 
-/// Like [`encode_wav`] with an optional loop and progress callback.
+/// Like [`encode_wav`] with an optional loop, size cap and progress callback.
 ///
 /// `loop_start`: `None` = no loop, `Some(0)` = whole-track loop, `Some(n)` = loop
-/// from sample `n` to the end. See [`encoder::encode_to_at9_ex`] for `progress`.
+/// from sample `n` to the end. `max_bytes`: 0 = no cap, else keep the output at or
+/// under that size (pass [`encoder::VITA_BGM_MAX_BYTES`] for Vita theme BGM).
+/// See [`encoder::encode_to_at9_ex`] for `progress`.
 pub fn encode_wav_ex(
     wav_buf: &[u8],
     bitrate: u32,
     loop_start: Option<u32>,
+    max_bytes: usize,
     progress: Option<crate::ProgressFn>,
 ) -> Result<Vec<u8>> {
     let pcm = wavread::parse_wav(wav_buf)?;
-    encoder::encode_to_at9_ex(&pcm, bitrate, loop_start, progress)
+    encoder::encode_to_at9_ex(&pcm, bitrate, loop_start, max_bytes, progress)
 }
 
 /// Encode interleaved 16-bit PCM samples to a complete AT9 file. `bitrate` in
@@ -45,16 +48,17 @@ pub fn encode_pcm16(
     sample_rate: u32,
     bitrate: u32,
 ) -> Result<Vec<u8>> {
-    encode_pcm16_ex(samples, channels, sample_rate, bitrate, None, None)
+    encode_pcm16_ex(samples, channels, sample_rate, bitrate, None, 0, None)
 }
 
-/// Like [`encode_pcm16`] with an optional loop and progress callback.
+/// Like [`encode_pcm16`] with an optional loop, size cap and progress callback.
 pub fn encode_pcm16_ex(
     samples: &[i16],
     channels: u16,
     sample_rate: u32,
     bitrate: u32,
     loop_start: Option<u32>,
+    max_bytes: usize,
     progress: Option<crate::ProgressFn>,
 ) -> Result<Vec<u8>> {
     let pcm = wavread::WavPcm {
@@ -62,7 +66,7 @@ pub fn encode_pcm16_ex(
         sample_rate,
         samples: samples.to_vec(),
     };
-    encoder::encode_to_at9_ex(&pcm, bitrate, loop_start, progress)
+    encoder::encode_to_at9_ex(&pcm, bitrate, loop_start, max_bytes, progress)
 }
 
 use crate::decode::tables::{

@@ -13,7 +13,7 @@ fn usage() {
          USAGE:\n  \
          at9 info   <in.at9>            Print container metadata\n  \
          at9 decode <in.at9> <out.wav>  Decode AT9 to 16-bit PCM WAV\n  \
-         at9 encode <in.wav> <out.at9>  Encode 16-bit PCM WAV to AT9\n  \
+         at9 encode [--vita-system-bgm|--ps-cross] <in.wav> <out.at9>\n                                 Encode 16-bit PCM WAV to AT9.\n                                 --vita-system-bgm caps the file under 5 MB\n                                   (PS Vita theme background music);\n                                 --ps-cross caps it at 2 MiB (PS4/PS5 too).\n                                 No flag = no size cap (general game AT9).\n  \
          at9 --version",
         at9codec::VERSION
     );
@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         }
         Some("info") if args.len() == 2 => cmd_info(&args[1]),
         Some("decode") if args.len() == 3 => cmd_decode(&args[1], &args[2]),
-        Some("encode") if args.len() == 3 => cmd_encode(&args[1], &args[2]),
+        Some("encode") if args.len() >= 3 => cmd_encode(&args[1..]),
         Some("rewrap") if args.len() == 3 => cmd_rewrap(&args[1], &args[2]),
         _ => {
             usage();
@@ -119,7 +119,20 @@ fn cmd_rewrap(input: &str, output: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_encode(input: &str, output: &str) -> ExitCode {
+fn cmd_encode(args: &[String]) -> ExitCode {
+    use at9codec::encode::encoder::{PS_CROSS_BGM_MAX_BYTES, VITA_BGM_MAX_BYTES};
+    let vita_bgm = args.iter().any(|a| a == "--vita-system-bgm");
+    let ps_cross = args.iter().any(|a| a == "--ps-cross");
+    let positional: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .collect();
+    if positional.len() != 2 {
+        usage();
+        return ExitCode::FAILURE;
+    }
+    let (input, output) = (positional[0], positional[1]);
     let buf = match std::fs::read(input) {
         Ok(b) => b,
         Err(e) => {
@@ -127,13 +140,29 @@ fn cmd_encode(input: &str, output: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match at9codec::encode::encode_wav(&buf, 0) {
+    // --ps-cross is the tighter 2 MiB cap (PS4/PS5); --vita-system-bgm is the
+    // Vita's under-5 MB cap; neither flag = no cap (general game AT9).
+    let (max_bytes, label) = if ps_cross {
+        (PS_CROSS_BGM_MAX_BYTES, "2 MiB PS4/PS5")
+    } else if vita_bgm {
+        (VITA_BGM_MAX_BYTES, "Vita 5 MB")
+    } else {
+        (0, "")
+    };
+    match at9codec::encode::encode_wav_ex(&buf, 0, None, max_bytes, None) {
         Ok(at9) => {
             if let Err(e) = std::fs::write(output, &at9) {
                 eprintln!("error: writing {output}: {e}");
                 return ExitCode::FAILURE;
             }
             println!("encoded {} bytes -> {output}", at9.len());
+            if max_bytes > 0 && at9.len() > max_bytes {
+                eprintln!(
+                    "warning: {} bytes exceeds the {label} system-BGM limit even at the \
+                     lowest bitrate — the console will not use it; shorten the track.",
+                    at9.len()
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

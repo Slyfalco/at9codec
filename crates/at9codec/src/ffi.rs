@@ -277,9 +277,17 @@ pub unsafe extern "C" fn at9_encode_wav(
     }
 }
 
-/// Like [`at9_encode`], with loop points and progress reporting. `loop_start`:
-/// negative = no loop, 0 = whole-track loop, positive = loop from that sample to
-/// the end (decoded-WAV coords). `cb`/`user` as in [`at9_decode_ex`] (NULL = none).
+/// PS Vita theme-BGM size cap (under 5 MB): pass as `max_bytes` for Vita theme
+/// background music. General game AT9 has no such limit — pass 0 there.
+pub const AT9_VITA_BGM_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// Tighter 2 MiB cap for a theme BGM that must also work on PS4/PS5.
+pub const AT9_PS_CROSS_BGM_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Like [`at9_encode`], with loop points, a size cap and progress reporting.
+/// `loop_start`: negative = no loop, 0 = whole-track loop, positive = loop from
+/// that sample to the end (decoded-WAV coords). `max_bytes`: 0 = no cap, else keep
+/// the output at or under that many bytes (pass [`AT9_VITA_BGM_MAX_BYTES`] or
+/// [`AT9_PS_CROSS_BGM_MAX_BYTES`] for theme BGM). `cb`/`user` as in [`at9_decode_ex`] (NULL = none).
 ///
 /// # Safety
 /// As [`at9_encode`]; `cb`, when non-null, must be a valid [`At9ProgressCb`].
@@ -291,6 +299,7 @@ pub unsafe extern "C" fn at9_encode_ex(
     sample_rate: u32,
     bitrate: u32,
     loop_start: i32,
+    max_bytes: usize,
     cb: Option<At9ProgressCb>,
     user: *mut c_void,
     out_at9: *mut *mut u8,
@@ -308,7 +317,7 @@ pub unsafe extern "C" fn at9_encode_ex(
         .as_ref()
         .map(|f| f as &(dyn Fn(u32, u32) + Sync));
     match crate::encode::encode_pcm16_ex(
-        samples, channels, sample_rate, bitrate, loop_opt(loop_start), progress,
+        samples, channels, sample_rate, bitrate, loop_opt(loop_start), max_bytes, progress,
     ) {
         Ok(bytes) => {
             let (ptr, len) = leak_u8(bytes);
@@ -320,8 +329,8 @@ pub unsafe extern "C" fn at9_encode_ex(
     }
 }
 
-/// Like [`at9_encode_wav`], with loop points and progress reporting. See
-/// [`at9_encode_ex`] for `loop_start` and `cb`/`user`.
+/// Like [`at9_encode_wav`], with loop points, a size cap and progress reporting.
+/// See [`at9_encode_ex`] for `loop_start`, `max_bytes` and `cb`/`user`.
 ///
 /// # Safety
 /// As [`at9_encode_wav`]; `cb`, when non-null, must be a valid [`At9ProgressCb`].
@@ -331,6 +340,7 @@ pub unsafe extern "C" fn at9_encode_wav_ex(
     wav_len: usize,
     bitrate: u32,
     loop_start: i32,
+    max_bytes: usize,
     cb: Option<At9ProgressCb>,
     user: *mut c_void,
     out_at9: *mut *mut u8,
@@ -347,7 +357,7 @@ pub unsafe extern "C" fn at9_encode_wav_ex(
     let progress: Option<crate::ProgressFn> = closure
         .as_ref()
         .map(|f| f as &(dyn Fn(u32, u32) + Sync));
-    match crate::encode::encode_wav_ex(buf, bitrate, loop_opt(loop_start), progress) {
+    match crate::encode::encode_wav_ex(buf, bitrate, loop_opt(loop_start), max_bytes, progress) {
         Ok(bytes) => {
             let (ptr, len) = leak_u8(bytes);
             *out_at9 = ptr;

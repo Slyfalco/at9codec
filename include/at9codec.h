@@ -100,17 +100,31 @@ int32_t at9_encode_wav(const uint8_t *wav, size_t wav_len, uint32_t bitrate,
                        uint8_t **out_at9, size_t *out_len);
 
 /*
- * Like at9_encode()/at9_encode_wav(), with loop points and progress reporting.
+ * Theme-BGM size caps for the max_bytes argument below. The Vita won't use a
+ * theme AT9 larger than ~5 MB; a theme that must also run on PS4/PS5 is capped
+ * tighter at 2 MiB. General game AT9 has no cap (pass max_bytes = 0).
+ */
+#define AT9_VITA_BGM_MAX_BYTES     (5u * 1024u * 1024u)
+#define AT9_PS_CROSS_BGM_MAX_BYTES  (2u * 1024u * 1024u)
+
+/*
+ * Like at9_encode()/at9_encode_wav(), with loop points, a size cap and progress.
  * loop_start: negative = no loop; 0 = whole-track loop; positive = loop from that
- * sample index to the end (decoded-PCM coordinates). cb/user as above (NULL = none).
+ * sample index to the end (decoded-PCM coordinates).
+ * max_bytes: 0 = no size cap (general AT9, up to the RIFF 4 GiB container); else
+ * the output is kept at or under that many bytes by choosing the highest standard
+ * bitrate that fits (pass AT9_VITA_BGM_MAX_BYTES or AT9_PS_CROSS_BGM_MAX_BYTES for
+ * theme BGM). cb/user as above (NULL = none).
  */
 int32_t at9_encode_ex(const int16_t *pcm, size_t sample_count,
                       uint16_t channels, uint32_t sample_rate, uint32_t bitrate,
-                      int32_t loop_start, At9ProgressCb cb, void *user,
+                      int32_t loop_start, size_t max_bytes,
+                      At9ProgressCb cb, void *user,
                       uint8_t **out_at9, size_t *out_len);
 
 int32_t at9_encode_wav_ex(const uint8_t *wav, size_t wav_len, uint32_t bitrate,
-                          int32_t loop_start, At9ProgressCb cb, void *user,
+                          int32_t loop_start, size_t max_bytes,
+                          At9ProgressCb cb, void *user,
                           uint8_t **out_at9, size_t *out_len);
 
 /* Free a buffer returned by any at9_encode* function. len = *out_len. */
