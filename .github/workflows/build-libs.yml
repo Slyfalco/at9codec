@@ -1,0 +1,144 @@
+name: Build shared libraries
+
+# Builds the at9codec shared library (cdylib) for every supported OS/arch and
+# publishes them as a single GitHub release. Each runner builds its own native
+# target — the library is pure Rust with no C dependencies, so no cross-compiler,
+# emulation or Rosetta is needed (the Intel-mac build runs on a native Intel
+# runner).
+#
+# Run it by pushing a version tag (v1.0, …) or from the Actions tab
+# ("Run workflow", optionally set a tag; defaults to "libs-latest"). The release
+# gets both the individual libraries and a combined `at9codec-native-libs.zip`
+# laid out as `native/<os>-<arch>/<lib>`, ready to drop into an embedding app.
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'libs-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish the libraries under'
+        required: false
+        default: 'libs-latest'
+
+permissions:
+  contents: write   # create/update the release
+
+jobs:
+  build:
+    name: ${{ matrix.tag }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest,  target: x86_64-pc-windows-msvc,    tag: windows-x64,   lib: at9codec.dll }
+          - { os: windows-11-arm,  target: aarch64-pc-windows-msvc,   tag: windows-arm64, lib: at9codec.dll }
+          - { os: ubuntu-latest,   target: x86_64-unknown-linux-gnu,  tag: linux-x64,     lib: libat9codec.so }
+          - { os: ubuntu-24.04-arm,target: aarch64-unknown-linux-gnu, tag: linux-arm64,   lib: libat9codec.so }
+          - { os: macos-14,        target: aarch64-apple-darwin,      tag: macos-arm64,   lib: libat9codec.dylib }
+          - { os: macos-13,        target: x86_64-apple-darwin,       tag: macos-x64,     lib: libat9codec.dylib }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }} -p at9codec
+
+      - name: Test (native host)
+        run: cargo test --release -p at9codec
+
+      - name: Stage library
+        shell: bash
+        run: |
+          mkdir -p "stage/native/${{ matrix.tag }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.lib }}" \
+             "stage/native/${{ matrix.tag }}/${{ matrix.lib }}"
+          # On Windows also keep the import library for linking from C/C++.
+          if [ -f "target/${{ matrix.target }}/release/at9codec.dll.lib" ]; then
+            cp "target/${{ matrix.target }}/release/at9codec.dll.lib" \
+               "stage/native/${{ matrix.tag }}/at9codec.dll.lib"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ matrix.tag }}
+          path: stage/native/${{ matrix.tag }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.repository == 'Slyfalco/at9codec'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all libraries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lib-*
+          path: incoming
+
+      - name: Assemble the native/ tree and assets
+        shell: bash
+        run: |
+          mkdir -p native assets
+          # download-artifact lays each one out as incoming/lib-<tag>/<files>.
+          for d in incoming/lib-*; do
+            tag="${d#incoming/lib-}"
+            mkdir -p "native/$tag"
+            cp "$d"/* "native/$tag/"
+            # A flat, clearly-named copy for one-off downloads.
+            for f in "$d"/*; do
+              base="$(basename "$f")"
+              case "$base" in
+                *.dll.lib) cp "$f" "assets/at9codec-$tag.dll.lib" ;;
+                at9codec.dll)      cp "$f" "assets/at9codec-$tag.dll" ;;
+                libat9codec.so)    cp "$f" "assets/libat9codec-$tag.so" ;;
+                libat9codec.dylib) cp "$f" "assets/libat9codec-$tag.dylib" ;;
+              esac
+            done
+          done
+          # Ship the header + license alongside the libs.
+          cp include/at9codec.h native/at9codec.h
+          cp LICENSE native/LICENSE
+          # Combined archive laid out exactly as an embedding app's native/ dir.
+          ( cd native && zip -r ../assets/at9codec-native-libs.zip . )
+          ls -R native
+          ls -l assets
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish / update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          NOTES="Prebuilt at9codec shared libraries for every supported platform.
+
+          Drop \`at9codec-native-libs.zip\` contents into an embedding app's
+          \`native/\` directory, or grab a single library by name
+          (\`at9codec-<os>-<arch>\`). Includes the C header and license."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber
+          else
+            gh release create "$TAG" assets/* \
+              --title "at9codec libraries ($TAG)" \
+              --notes "$NOTES" \
+              ${{ github.event_name == 'workflow_dispatch' && '--prerelease' || '' }}
+          fi
