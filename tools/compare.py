@@ -6,17 +6,17 @@ the clean-room codec is correct:
 
   * a reference decoder (set AT9_REF_DECODER to its exe) -> ground truth,
     invoked as `<exe> -repeat 1 -d <in> <out>` (true length)
-  * the reference encoder.exe  -> cross-check (clean-room C#, true length)
-  * ffmpeg          -> cross-check (native ATRAC9, trimmed to true length)
+  * an optional second reference decoder (AT9_REF_DECODER2, invoked
+    `<exe> -i <in> -o <out>`) -> cross-check
+  * ffmpeg -> cross-check (native ATRAC9, trimmed to true length)
 
 For each AT9 file it:
   1. runs `at9 info` and checks the reported true length against the reference,
   2. (when `at9 decode` works) decodes with our CLI and the reference and reports
      frame-count match, max abs sample diff and RMS error.
 
-Set AT9_REF_DECODER to the reference decoder executable, and/or point
---tools-dir (or AT9_REF_TOOLS) at a folder containing the reference encoder.exe. Pure
-stdlib (wave/struct/subprocess), runs anywhere.
+Set AT9_REF_DECODER (and optionally AT9_REF_DECODER2) to reference decoder
+executables. Pure stdlib (wave/struct/subprocess), runs anywhere.
 """
 import argparse
 import os
@@ -46,18 +46,19 @@ def read_samples(path):
 
 
 def ref_decode(at9, out, tools_dir, ffmpeg):
-    """Produce a true-length reference WAV. Prefer the configured reference
-    decoder (AT9_REF_DECODER), then the reference encoder, then ffmpeg."""
+    """Produce a true-length reference WAV. Tries, in order: the configured
+    reference decoder (AT9_REF_DECODER), an optional second one
+    (AT9_REF_DECODER2), then ffmpeg."""
     ref = os.environ.get("AT9_REF_DECODER", "")
-    vg = os.path.join(tools_dir, "the reference encoder.exe")
+    ref2 = os.environ.get("AT9_REF_DECODER2", "")
     if ref and os.path.isfile(ref):
         r = run([ref, "-repeat", "1", "-d", at9, out])
         if r.returncode == 0 and os.path.exists(out):
             return "reference"
-    if os.path.isfile(vg):
-        r = run([vg, "-i", at9, "-o", out])
+    if ref2 and os.path.isfile(ref2):
+        r = run([ref2, "-i", at9, "-o", out])
         if r.returncode == 0 and os.path.exists(out):
-            return "the reference encoder"
+            return "reference2"
     if ffmpeg:
         r = run([ffmpeg, "-y", "-i", at9, out])
         if r.returncode == 0 and os.path.exists(out):
@@ -93,7 +94,7 @@ def main():
     ap.add_argument("inputs", nargs="+", help="AT9 file(s) or directories")
     ap.add_argument("--cli", default=None, help="path to our `at9` binary")
     ap.add_argument("--tools-dir", default=DEFAULT_TOOLS,
-                    help="dir with the reference encoder.exe (reference decoder via AT9_REF_DECODER)")
+                    help="reference tools dir (reference decoders via AT9_REF_DECODER[2])")
     ap.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg path (or '' to skip)")
     args = ap.parse_args()
 
