@@ -32,6 +32,11 @@ pub use error::{Error, Result};
 /// Library version string (from Cargo).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// A progress callback: `(units_done, units_total)`. Called from the codec; for
+/// the parallel encoder it runs on a dedicated monitor thread, so it must be
+/// `Sync`. Keep it cheap. One "unit" is one superframe.
+pub type ProgressFn<'a> = &'a (dyn Fn(u32, u32) + Sync);
+
 /// Parse an AT9 file buffer into its [`Container`] metadata.
 pub fn parse(buf: &[u8]) -> Result<Container> {
     container::parse(buf)
@@ -62,4 +67,10 @@ impl Pcm {
 pub fn decode_to_pcm16(buf: &[u8]) -> Result<Pcm> {
     let container = parse(buf)?;
     decode::decode_container(&container, buf)
+}
+
+/// Like [`decode_to_pcm16`], reporting `(superframes_done, total)` as it runs.
+pub fn decode_to_pcm16_progress(buf: &[u8], progress: Option<ProgressFn>) -> Result<Pcm> {
+    let container = parse(buf)?;
+    decode::decode_container_progress(&container, buf, progress)
 }

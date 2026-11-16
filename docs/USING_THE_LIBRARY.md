@@ -41,6 +41,9 @@ The header is standalone and depends only on `<stddef.h>` and `<stdint.h>`.
 | `at9_encode()`     | Interleaved 16-bit PCM → AT9 file.                  |
 | `at9_encode_wav()` | WAV file buffer → AT9 file.                         |
 | `at9_free_at9()`   | Free a buffer from the encode functions.            |
+| `at9_decode_ex()`  | `at9_decode()` plus a progress callback.            |
+| `at9_encode_ex()`  | `at9_encode()` plus loop points and progress.       |
+| `at9_encode_wav_ex()` | `at9_encode_wav()` plus loop points and progress. |
 
 **Status codes** (returned by the `int32_t` functions): `AT9_OK` (0), plus negative
 `AT9_ERR_NULL`, `AT9_ERR_PARSE`, `AT9_ERR_DECODE`, `AT9_ERR_ENCODE`.
@@ -57,6 +60,19 @@ plus a length to your out-parameters. Release each buffer with its matching
 `at9_free_*` function — **never** with your own `free()`/`delete`, and never mix the
 two free functions. Pass the exact length the function returned back to the free
 function.
+
+### Loop points and progress
+
+The `_ex` encode functions take a `loop_start` argument: negative = no loop, `0` =
+loop the whole track, positive = loop from that sample index (decoded-PCM
+coordinates) to the end. The loop is written into the AT9 container's `smpl`
+chunk and read back by `at9_parse_info()` (`has_loop`/`loop_start`/`loop_end`/
+`is_whole_loop`).
+
+All `_ex` functions also accept an `At9ProgressCb cb` and a `void *user`. The
+callback receives `(user, done, total)` in superframes. During encode it runs on
+one dedicated monitor thread (the encode workers never call it), so it adds no
+measurable cost; pass `NULL` to skip it entirely (no monitor thread is spawned).
 
 ### Thread-safety
 

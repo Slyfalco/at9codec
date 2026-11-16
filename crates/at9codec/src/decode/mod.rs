@@ -78,6 +78,17 @@ impl DecoderConfig {
 /// Decode a parsed AT9 container to interleaved 16-bit PCM, stripping the encoder
 /// delay and trimming to the true length (so output matches the reference tool/VGAudio).
 pub fn decode_container(container: &crate::container::Container, buf: &[u8]) -> Result<crate::Pcm> {
+    decode_container_progress(container, buf, None)
+}
+
+/// Like [`decode_container`], but reports progress as `(superframes_done, total)`
+/// after each superframe. The callback runs on the decode thread, so keep it
+/// cheap; pass `None` for no reporting.
+pub fn decode_container_progress(
+    container: &crate::container::Container,
+    buf: &[u8],
+    progress: Option<crate::ProgressFn>,
+) -> Result<crate::Pcm> {
     let config = DecoderConfig::new(&container.config)?;
     if config.superframe_bytes == 0 {
         return Err(Error::BadConfig);
@@ -100,6 +111,9 @@ pub fn decode_container(container: &crate::container::Container, buf: &[u8]) -> 
             let mut br = bitreader::BitReader::new(&sf_slice[off..]);
             decoder.decode_frame(&mut br, &mut raw)?;
             off += br.pos.div_ceil(8);
+        }
+        if let Some(cb) = progress {
+            cb((sf + 1) as u32, superframe_count as u32);
         }
     }
 

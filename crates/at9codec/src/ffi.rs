@@ -6,7 +6,7 @@
 //! allocator). See `include/at9codec.h` and `docs/USING_THE_LIBRARY.md`.
 
 use crate::container;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 
 /// Status codes returned across the ABI.
 pub const AT9_OK: i32 = 0;
@@ -14,6 +14,31 @@ pub const AT9_ERR_NULL: i32 = -1;
 pub const AT9_ERR_PARSE: i32 = -2;
 pub const AT9_ERR_DECODE: i32 = -3;
 pub const AT9_ERR_ENCODE: i32 = -4;
+
+/// Progress callback: `(user, units_done, units_total)`. One unit = one
+/// superframe. Invoked from a single thread (a dedicated monitor thread for
+/// encode; the decode thread for decode); never concurrently.
+pub type At9ProgressCb = unsafe extern "C" fn(*mut c_void, u32, u32);
+
+/// A C callback + its opaque user pointer, bundled so it can cross into the
+/// codec's monitor thread. The pointer is only ever handed back to the caller's
+/// own callback, so we assert Send/Sync for it.
+struct CProgress {
+    cb: At9ProgressCb,
+    user: *mut c_void,
+}
+unsafe impl Send for CProgress {}
+unsafe impl Sync for CProgress {}
+
+/// `loop_start` convention shared by the encode `_ex` functions: negative = no
+/// loop, 0 = whole-track loop, positive = loop from that sample to the end.
+fn loop_opt(loop_start: i32) -> Option<u32> {
+    if loop_start < 0 {
+        None
+    } else {
+        Some(loop_start as u32)
+    }
+}
 
 fn leak_u8(v: Vec<u8>) -> (*mut u8, usize) {
     let b = v.into_boxed_slice();
@@ -134,6 +159,49 @@ pub unsafe extern "C" fn at9_decode(
     }
 }
 
+/// Like [`at9_decode`], but reports progress through `cb`/`user` (one call per
+/// superframe). Pass `cb = NULL` for no reporting (identical to [`at9_decode`]).
+///
+/// # Safety
+/// As [`at9_decode`]; additionally `cb`, when non-null, must be a valid function
+/// pointer callable as [`At9ProgressCb`].
+#[no_mangle]
+pub unsafe extern "C" fn at9_decode_ex(
+    at9: *const u8,
+    at9_len: usize,
+    cb: Option<At9ProgressCb>,
+    user: *mut c_void,
+    out_pcm: *mut *mut i16,
+    out_count: *mut usize,
+    out_channels: *mut u16,
+    out_sample_rate: *mut u32,
+) -> i32 {
+    if at9.is_null() || out_pcm.is_null() || out_count.is_null()
+        || out_channels.is_null() || out_sample_rate.is_null()
+    {
+        return AT9_ERR_NULL;
+    }
+    let buf = std::slice::from_raw_parts(at9, at9_len);
+    let ctx = cb.map(|cb| CProgress { cb, user });
+    let closure = ctx
+        .as_ref()
+        .map(|c| move |d, t| unsafe { (c.cb)(c.user, d, t) });
+    let progress: Option<crate::ProgressFn> = closure
+        .as_ref()
+        .map(|f| f as &(dyn Fn(u32, u32) + Sync));
+    match crate::decode_to_pcm16_progress(buf, progress) {
+        Ok(pcm) => {
+            *out_channels = pcm.channels;
+            *out_sample_rate = pcm.sample_rate;
+            let (ptr, len) = leak_i16(pcm.samples);
+            *out_pcm = ptr;
+            *out_count = len;
+            AT9_OK
+        }
+        Err(_) => AT9_ERR_DECODE,
+    }
+}
+
 /// Free a PCM buffer returned by [`at9_decode`]. `count` must be the value
 /// written to `out_count`.
 ///
@@ -199,6 +267,87 @@ pub unsafe extern "C" fn at9_encode_wav(
     }
     let buf = std::slice::from_raw_parts(wav, wav_len);
     match crate::encode::encode_wav(buf, bitrate) {
+        Ok(bytes) => {
+            let (ptr, len) = leak_u8(bytes);
+            *out_at9 = ptr;
+            *out_len = len;
+            AT9_OK
+        }
+        Err(_) => AT9_ERR_ENCODE,
+    }
+}
+
+/// Like [`at9_encode`], with loop points and progress reporting. `loop_start`:
+/// negative = no loop, 0 = whole-track loop, positive = loop from that sample to
+/// the end (decoded-WAV coords). `cb`/`user` as in [`at9_decode_ex`] (NULL = none).
+///
+/// # Safety
+/// As [`at9_encode`]; `cb`, when non-null, must be a valid [`At9ProgressCb`].
+#[no_mangle]
+pub unsafe extern "C" fn at9_encode_ex(
+    pcm: *const i16,
+    sample_count: usize,
+    channels: u16,
+    sample_rate: u32,
+    bitrate: u32,
+    loop_start: i32,
+    cb: Option<At9ProgressCb>,
+    user: *mut c_void,
+    out_at9: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if pcm.is_null() || out_at9.is_null() || out_len.is_null() {
+        return AT9_ERR_NULL;
+    }
+    let samples = std::slice::from_raw_parts(pcm, sample_count);
+    let ctx = cb.map(|cb| CProgress { cb, user });
+    let closure = ctx
+        .as_ref()
+        .map(|c| move |d, t| unsafe { (c.cb)(c.user, d, t) });
+    let progress: Option<crate::ProgressFn> = closure
+        .as_ref()
+        .map(|f| f as &(dyn Fn(u32, u32) + Sync));
+    match crate::encode::encode_pcm16_ex(
+        samples, channels, sample_rate, bitrate, loop_opt(loop_start), progress,
+    ) {
+        Ok(bytes) => {
+            let (ptr, len) = leak_u8(bytes);
+            *out_at9 = ptr;
+            *out_len = len;
+            AT9_OK
+        }
+        Err(_) => AT9_ERR_ENCODE,
+    }
+}
+
+/// Like [`at9_encode_wav`], with loop points and progress reporting. See
+/// [`at9_encode_ex`] for `loop_start` and `cb`/`user`.
+///
+/// # Safety
+/// As [`at9_encode_wav`]; `cb`, when non-null, must be a valid [`At9ProgressCb`].
+#[no_mangle]
+pub unsafe extern "C" fn at9_encode_wav_ex(
+    wav: *const u8,
+    wav_len: usize,
+    bitrate: u32,
+    loop_start: i32,
+    cb: Option<At9ProgressCb>,
+    user: *mut c_void,
+    out_at9: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if wav.is_null() || out_at9.is_null() || out_len.is_null() {
+        return AT9_ERR_NULL;
+    }
+    let buf = std::slice::from_raw_parts(wav, wav_len);
+    let ctx = cb.map(|cb| CProgress { cb, user });
+    let closure = ctx
+        .as_ref()
+        .map(|c| move |d, t| unsafe { (c.cb)(c.user, d, t) });
+    let progress: Option<crate::ProgressFn> = closure
+        .as_ref()
+        .map(|f| f as &(dyn Fn(u32, u32) + Sync));
+    match crate::encode::encode_wav_ex(buf, bitrate, loop_opt(loop_start), progress) {
         Ok(bytes) => {
             let (ptr, len) = leak_u8(bytes);
             *out_at9 = ptr;

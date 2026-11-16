@@ -848,6 +848,21 @@ fn encode_stereo_frame(
 
 /// Encode 16-bit PCM to a complete AT9 file at a standard bitrate.
 pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
+    encode_to_at9_ex(wav, bitrate, None, None)
+}
+
+/// Encode PCM to a complete AT9 file, with optional loop and progress reporting.
+///
+/// `loop_start`: `None` writes no loop; `Some(0)` loops the whole track; `Some(n)`
+/// loops from sample `n` to the end (in decoded-WAV coordinates). `progress` is
+/// called `(superframes_done, total)` from a monitor thread during the parallel
+/// encode (cheap, never on the worker threads); pass `None` to skip it entirely.
+pub fn encode_to_at9_ex(
+    wav: &WavPcm,
+    bitrate: u32,
+    loop_start: Option<u32>,
+    progress: Option<crate::ProgressFn>,
+) -> Result<Vec<u8>> {
     if wav.sample_rate == 0 || wav.channels == 0 {
         return Err(Error::BadConfig);
     }
@@ -912,7 +927,17 @@ pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, total_sf.max(1));
-    let encode_sf = |sf_idx: usize, slot: &mut Vec<u8>| {
+
+    // Progress is tracked with a single shared atomic the workers bump per
+    // superframe (one relaxed add — effectively free). When a callback is given,
+    // a dedicated monitor thread polls it and invokes the callback, so the encode
+    // workers never call into foreign code. With no callback, no monitor is spawned.
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let done = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let total_sf_u = total_sf as u32;
+
+    let encode_sf = |sf_idx: usize, slot: &mut Vec<u8>, done: &AtomicUsize| {
         let mut buf = Vec::with_capacity(superframe_bytes);
         for fi in 0..FRAMES_PER_SUPERFRAME {
             let f = sf_idx * FRAMES_PER_SUPERFRAME + fi;
@@ -923,17 +948,34 @@ pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
         }
         buf.resize(superframe_bytes, 0);
         *slot = buf;
+        done.fetch_add(1, Ordering::Relaxed);
     };
-    if nthreads <= 1 {
-        for (sf_idx, slot) in results.iter_mut().enumerate() {
-            encode_sf(sf_idx, slot);
+
+    std::thread::scope(|s| {
+        if let Some(cb) = progress {
+            let done = &done;
+            let stop = &stop;
+            s.spawn(move || {
+                cb(0, total_sf_u);
+                while !stop.load(Ordering::Acquire) {
+                    let d = (done.load(Ordering::Relaxed) as u32).min(total_sf_u);
+                    cb(d, total_sf_u);
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                cb(total_sf_u, total_sf_u);
+            });
         }
-    } else {
-        let chunk = total_sf.div_ceil(nthreads);
-        let spectra = &spectra;
-        let huff = &huff;
-        let curves = &curves;
-        std::thread::scope(|s| {
+
+        if nthreads <= 1 {
+            for (sf_idx, slot) in results.iter_mut().enumerate() {
+                encode_sf(sf_idx, slot, &done);
+            }
+        } else {
+            let chunk = total_sf.div_ceil(nthreads);
+            let spectra = &spectra;
+            let huff = &huff;
+            let curves = &curves;
+            let done = &done;
             for (ti, slots) in results.chunks_mut(chunk).enumerate() {
                 let base = ti * chunk;
                 s.spawn(move || {
@@ -950,11 +992,13 @@ pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
                         }
                         buf.resize(superframe_bytes, 0);
                         *slot = buf;
+                        done.fetch_add(1, Ordering::Relaxed);
                     }
                 });
             }
-        });
-    }
+        }
+        stop.store(true, Ordering::Release);
+    });
     let mut data = Vec::with_capacity(total_sf * superframe_bytes);
     for sf in results {
         data.extend_from_slice(&sf);
@@ -971,7 +1015,7 @@ pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
         frames_per_superframe: FRAMES_PER_SUPERFRAME,
         superframe_bytes: superframe_bytes as u32,
     };
-    Ok(build_at9_container(&config, &data, total_samples, ENCODER_DELAY, None))
+    Ok(build_at9_container(&config, &data, total_samples, ENCODER_DELAY, loop_start))
 }
 
 #[cfg(test)]

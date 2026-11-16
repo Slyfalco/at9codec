@@ -45,6 +45,15 @@ typedef struct {
     uint32_t is_whole_loop;
 } At9Info;
 
+/*
+ * Progress callback: (user, units_done, units_total). One unit is one superframe.
+ * It is invoked from a single thread (a dedicated monitor thread during encode,
+ * the decode thread during decode), never concurrently, so it need not be
+ * re-entrant. Keep it cheap. Pass NULL to the _ex functions for no reporting
+ * (then no monitor thread is spawned — zero overhead).
+ */
+typedef void (*At9ProgressCb)(void *user, uint32_t done, uint32_t total);
+
 /* Null-terminated version string, valid for the life of the library. */
 const char *at9_version(void);
 
@@ -60,7 +69,16 @@ int32_t at9_decode(const uint8_t *at9, size_t at9_len,
                    int16_t **out_pcm, size_t *out_count,
                    uint16_t *out_channels, uint32_t *out_sample_rate);
 
-/* Free a buffer returned by at9_decode(). count = the returned *out_count. */
+/*
+ * Like at9_decode(), but reports progress via cb/user (one call per superframe).
+ * Pass cb = NULL for no reporting (identical to at9_decode()).
+ */
+int32_t at9_decode_ex(const uint8_t *at9, size_t at9_len,
+                      At9ProgressCb cb, void *user,
+                      int16_t **out_pcm, size_t *out_count,
+                      uint16_t *out_channels, uint32_t *out_sample_rate);
+
+/* Free a buffer returned by at9_decode()/at9_decode_ex(). count = *out_count. */
 void at9_free_pcm(int16_t *pcm, size_t count);
 
 /*
@@ -81,7 +99,21 @@ int32_t at9_encode(const int16_t *pcm, size_t sample_count,
 int32_t at9_encode_wav(const uint8_t *wav, size_t wav_len, uint32_t bitrate,
                        uint8_t **out_at9, size_t *out_len);
 
-/* Free a buffer returned by at9_encode() / at9_encode_wav(). len = *out_len. */
+/*
+ * Like at9_encode()/at9_encode_wav(), with loop points and progress reporting.
+ * loop_start: negative = no loop; 0 = whole-track loop; positive = loop from that
+ * sample index to the end (decoded-PCM coordinates). cb/user as above (NULL = none).
+ */
+int32_t at9_encode_ex(const int16_t *pcm, size_t sample_count,
+                      uint16_t channels, uint32_t sample_rate, uint32_t bitrate,
+                      int32_t loop_start, At9ProgressCb cb, void *user,
+                      uint8_t **out_at9, size_t *out_len);
+
+int32_t at9_encode_wav_ex(const uint8_t *wav, size_t wav_len, uint32_t bitrate,
+                          int32_t loop_start, At9ProgressCb cb, void *user,
+                          uint8_t **out_at9, size_t *out_len);
+
+/* Free a buffer returned by any at9_encode* function. len = *out_len. */
 void at9_free_at9(uint8_t *at9, size_t len);
 
 #ifdef __cplusplus
