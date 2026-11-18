@@ -17,7 +17,7 @@ codec removes that dependency and makes AT9 usable from any language on any OS.
 | Container parsing (`fmt`/`fact`/`smpl`/`data`, ATRAC9 config, loop points, true length) | ✅ done |
 | Decode → PCM (LibAtrac9 basis) | ✅ done |
 | Validation harness | ✅ done |
-| Encode (from scratch — no open ATRAC9 encoder exists) | ✅ done |
+| Encode (from scratch — no open ATRAC9 encoder exists) | ✅ plays on real hardware but looping not yet working |
 
 Decode is verified **bit-for-bit identical** to the AT9 format across
 every test file (max sample difference 0). Run `tools/compare.py` against a folder
