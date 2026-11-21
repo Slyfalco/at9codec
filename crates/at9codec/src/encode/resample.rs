@@ -72,6 +72,34 @@ pub fn resample(pcm: &WavPcm, to_rate: u32) -> WavPcm {
     // fraction when downsampling, to band-limit and avoid aliasing.
     let fc = if ratio >= 1.0 { 1.0 } else { ratio };
 
+    // Precompute the windowed-sinc kernel as a polyphase table: one 32-tap kernel
+    // per fractional sub-phase. The inner loop then does table lookups and MACs
+    // instead of recomputing sin/cos per tap per output sample (which, over millions
+    // of frames, dominated encode time for resampled sources). Sub-phase resolution
+    // is 1/PHASES of an input sample — inaudible position error.
+    const PHASES: usize = 256;
+    const TAPS: usize = (2 * HALF) as usize; // 32
+    let mut kernels = vec![[0f64; TAPS]; PHASES];
+    let mut kernel_sums = vec![0f64; PHASES];
+    for (p, ker) in kernels.iter_mut().enumerate() {
+        let frac = p as f64 / PHASES as f64;
+        let mut ws = 0.0;
+        for (j, w) in ker.iter_mut().enumerate() {
+            let m = j as i64 - HALF + 1; // tap offset from center, -15..=16
+            let d = frac - m as f64; // distance in input samples
+            let wn = d / HALF as f64; // Blackman window position over [-1, 1]
+            *w = if wn.abs() > 1.0 {
+                0.0
+            } else {
+                let t = std::f64::consts::PI * (wn + 1.0); // map [-1,1] -> [0,2pi]
+                let window = 0.42 - 0.5 * t.cos() + 0.08 * (2.0 * t).cos();
+                fc * sinc(fc * d) * window
+            };
+            ws += *w;
+        }
+        kernel_sums[p] = ws;
+    }
+
     // De-interleave into per-channel f64 for the inner loop.
     let mut chans: Vec<Vec<f64>> = vec![Vec::with_capacity(in_frames); ch];
     for (i, &s) in pcm.samples.iter().enumerate() {
@@ -83,27 +111,40 @@ pub fn resample(pcm: &WavPcm, to_rate: u32) -> WavPcm {
     for o in 0..out_frames {
         let pos = o as f64 * step; // position in input-frame coords
         let center = pos.floor() as i64;
+        let frac = pos - center as f64;
+        let p = ((frac * PHASES as f64).round() as usize).min(PHASES - 1);
+        let ker = &kernels[p];
+        let lo = center - HALF + 1; // input index of tap 0
+        let hi = center + HALF; // input index of the last tap
+        let interior = lo >= 0 && (hi as usize) < in_frames;
         for c in 0..ch {
             let x = &chans[c];
-            let mut acc = 0.0;
-            let mut wsum = 0.0;
-            for k in (center - HALF + 1)..=(center + HALF) {
-                if k < 0 || (k as usize) >= in_frames {
-                    continue;
+            let v = if interior {
+                // Fast path: all taps in range, use the precomputed normalization.
+                let base = lo as usize;
+                let mut acc = 0.0;
+                for (j, &w) in ker.iter().enumerate() {
+                    acc += x[base + j] * w;
                 }
-                let d = pos - k as f64; // distance in input samples
-                // Blackman window over [-HALF, HALF].
-                let wn = d / HALF as f64;
-                if wn.abs() > 1.0 {
-                    continue;
+                acc / kernel_sums[p]
+            } else {
+                // Edge frame: sum only the valid taps, renormalizing over them.
+                let mut acc = 0.0;
+                let mut ws = 0.0;
+                for (j, &w) in ker.iter().enumerate() {
+                    let k = lo + j as i64;
+                    if k < 0 || (k as usize) >= in_frames {
+                        continue;
+                    }
+                    acc += x[k as usize] * w;
+                    ws += w;
                 }
-                let t = std::f64::consts::PI * (wn + 1.0); // map [-1,1] -> [0,2pi]
-                let window = 0.42 - 0.5 * t.cos() + 0.08 * (2.0 * t).cos();
-                let w = fc * sinc(fc * d) * window;
-                acc += x[k as usize] * w;
-                wsum += w;
-            }
-            let v = if wsum.abs() > 1e-12 { acc / wsum } else { 0.0 };
+                if ws.abs() > 1e-12 {
+                    acc / ws
+                } else {
+                    0.0
+                }
+            };
             out[o * ch + c] = v.round().clamp(-32768.0, 32767.0) as i16;
         }
     }
