@@ -55,14 +55,26 @@ cap for a theme that must also run on PS4/PS5. With no flag there is no cap
 to embedders through the library's `max_bytes` argument (see
 `docs/USING_THE_LIBRARY.md`).
 
+## Using it from other languages
+
+The shared library exposes a small, stable C ABI driven by options structs (set
+only the fields you need, or pass NULL for defaults). Ready-to-use, documented
+bindings live in [`bindings/`](bindings) — C/C++, Python (ctypes), C# (P/Invoke),
+Go (cgo), Swift (C interop) and Kotlin/Android (JNA) — each wrapping `decode()` and
+`encode()` with loop (start + optional end), size caps and a progress callback.
+The codec resamples any input rate to a console rate itself, so callers don't have
+to. See [`docs/USING_THE_LIBRARY.md`](docs/USING_THE_LIBRARY.md).
+
 ## Workspace layout
 
 ```
 crates/at9codec/   core library (pure Rust, no deps) — builds rlib + cdylib
   src/container.rs  AT9 RIFF/WAVE parsing + ATRAC9 config
-  src/wav.rs        16-bit PCM WAV writer
-  src/ffi.rs        C ABI for the cdylib
+  src/ffi.rs        C ABI for the cdylib (options-struct API)
+  src/encode/       encoder (MDCT, allocation, resampling, container writer)
 crates/at9cli/      the `at9` command-line tool
+include/at9codec.h  C header
+bindings/           language bindings + examples (C, Python, C#, Go, Swift, Kotlin)
 tools/compare.py    validation harness (compares our output to reference decoders)
 reference/          clean-room reference sources, analysis only (git-ignored)
 ```

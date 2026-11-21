@@ -17,3 +17,11 @@ the reference encoder.exe
 
 # JetBrains IDE
 .idea/
+
+# binding build artifacts
+bindings/**/__pycache__/
+bindings/**/*.dll
+bindings/**/*.so
+bindings/**/*.dylib
+bindings/**/*.exe
+bindings/**/*.obj
