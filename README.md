@@ -43,9 +43,15 @@ cargo build --release
 ```sh
 at9 info   input.at9             # print container metadata
 at9 decode input.at9 out.wav     # decode to 16-bit PCM WAV
-at9 encode input.wav out.at9     # encode WAV to AT9 (no size cap)
+at9 encode input.wav out.at9     # encode WAV to AT9 (no size cap, no loop)
 at9 encode --vita-system-bgm input.wav out.at9   # cap under 5 MB for PS Vita theme BGM
 at9 encode --ps-cross        input.wav out.at9   # cap at 2 MiB (PS4/PS5 too)
+
+# Looping
+at9 encode --loop input.wav out.at9                    # loop the whole track
+at9 encode --loop-start 100000 input.wav out.at9       # loop from sample 100000 to the end
+at9 encode --loop-start 100000 --loop-end 2000000 input.wav out.at9  # loop a section
+at9 encode --vita-system-bgm --loop input.wav out.at9  # flags combine
 ```
 
 `--vita-system-bgm` keeps the file under the PS Vita's theme-BGM size limit
@@ -55,6 +61,22 @@ cap for a theme that must also run on PS4/PS5. With no flag there is no cap
 (general game AT9, up to the RIFF container's 4 GiB). The same control is exposed
 to embedders through the library's `size_profile` option, which names the target so
 the codec applies its own limit (see `docs/USING_THE_LIBRARY.md`).
+
+### Custom loop points
+
+By default the output has no loop. Add a loop with:
+
+- `--loop` — loop the **whole track** (repeats from the start).
+- `--loop-start <sample>` — loop **from** that sample index; playback jumps back
+  here at the end instead of to the start.
+- `--loop-end <sample>` — the **inclusive last sample** of the loop; omit it to
+  loop to the end of the track.
+
+Give sample indices in the **source** (input-WAV) sample rate. If the source isn't
+a console rate the codec resamples it (to 48/24/12 kHz) and **scales the loop points
+to match**, so they land in the right place either way. The points are written to the
+AT9 `smpl`/`fact` chunks and read back by `at9 info`. Giving only `--loop-end`
+implies a whole-track loop up to that sample.
 
 ## Using it from other languages
 

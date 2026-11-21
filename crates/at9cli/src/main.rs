@@ -13,7 +13,7 @@ fn usage() {
          USAGE:\n  \
          at9 info   <in.at9>            Print container metadata\n  \
          at9 decode <in.at9> <out.wav>  Decode AT9 to 16-bit PCM WAV\n  \
-         at9 encode [--vita-system-bgm|--ps-cross] <in.wav> <out.at9>\n                                 Encode 16-bit PCM WAV to AT9.\n                                 --vita-system-bgm caps the file under 5 MB\n                                   (PS Vita theme background music);\n                                 --ps-cross caps it at 2 MiB (PS4/PS5 too).\n                                 No flag = no size cap (general game AT9).\n  \
+         at9 encode [options] <in.wav> <out.at9>\n                                 Encode 16-bit PCM WAV to AT9.\n    Size:   --vita-system-bgm  cap the file under 5 MB (PS Vita theme BGM)\n            --ps-cross         cap at 2 MiB (works on PS4/PS5 too)\n                               (no size flag = no cap, general game AT9)\n    Loop:   --loop             loop the whole track\n            --loop-start <n>   loop from sample n (in input-WAV samples)\n            --loop-end <n>     inclusive last sample of the loop\n                               (omit for the track end; no loop flag = no loop)\n  \
          at9 --version",
         at9codec::VERSION
     );
@@ -122,13 +122,41 @@ fn cmd_rewrap(input: &str, output: &str) -> ExitCode {
 
 fn cmd_encode(args: &[String]) -> ExitCode {
     use at9codec::encode::SizeLimit;
-    let vita_bgm = args.iter().any(|a| a == "--vita-system-bgm");
-    let ps_cross = args.iter().any(|a| a == "--ps-cross");
-    let positional: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with("--"))
-        .map(String::as_str)
-        .collect();
+    let mut vita_bgm = false;
+    let mut ps_cross = false;
+    let mut whole_loop = false;
+    let mut loop_start: Option<u32> = None;
+    let mut loop_end: Option<u32> = None;
+    let mut positional: Vec<&str> = Vec::new();
+
+    // Parse flags, consuming a value after --loop-start / --loop-end.
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--vita-system-bgm" => vita_bgm = true,
+            "--ps-cross" => ps_cross = true,
+            "--loop" => whole_loop = true,
+            "--loop-start" | "--loop-end" => {
+                let name = args[i].clone();
+                i += 1;
+                match args.get(i).and_then(|s| s.parse::<u32>().ok()) {
+                    Some(n) if name == "--loop-start" => loop_start = Some(n),
+                    Some(n) => loop_end = Some(n),
+                    None => {
+                        eprintln!("error: {name} needs a sample-number value");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            s if s.starts_with("--") => {
+                eprintln!("error: unknown option {s}");
+                usage();
+                return ExitCode::FAILURE;
+            }
+            _ => positional.push(args[i].as_str()),
+        }
+        i += 1;
+    }
     if positional.len() != 2 {
         usage();
         return ExitCode::FAILURE;
@@ -151,7 +179,21 @@ fn cmd_encode(args: &[String]) -> ExitCode {
     } else {
         SizeLimit::None
     };
-    let opts = at9codec::encode::EncodeOptions { size_limit, ..Default::default() };
+    // A loop exists if any loop flag is given. --loop-start sets where it repeats
+    // from; --loop (or a bare --loop-end) means the whole track (from sample 0).
+    // --loop-end is the inclusive last sample; omit it to loop to the track end.
+    let loop_start = match loop_start {
+        Some(n) => Some(n),
+        None if whole_loop || loop_end.is_some() => Some(0),
+        None => None,
+    };
+    let loop_end = if loop_start.is_some() { loop_end } else { None };
+    let opts = at9codec::encode::EncodeOptions {
+        size_limit,
+        loop_start,
+        loop_end,
+        ..Default::default()
+    };
     match at9codec::encode::encode_wav(&buf, &opts) {
         Ok(at9) => {
             if let Err(e) = std::fs::write(output, &at9) {
