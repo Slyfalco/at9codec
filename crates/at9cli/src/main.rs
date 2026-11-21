@@ -113,6 +113,7 @@ fn cmd_rewrap(input: &str, output: &str) -> ExitCode {
     let out = at9codec::encode::build_at9_container(
         &cfg, &data, c.total_samples, c.encoder_delay,
         c.loop_info.map(|l| l.start),
+        c.loop_info.map(|l| l.end),
     );
     std::fs::write(output, &out).expect("write");
     println!("rewrapped {} -> {output} ({} bytes)", input, out.len());
@@ -149,7 +150,8 @@ fn cmd_encode(args: &[String]) -> ExitCode {
     } else {
         (0, "")
     };
-    match at9codec::encode::encode_wav_ex(&buf, 0, None, max_bytes, None) {
+    let opts = at9codec::encode::EncodeOptions { max_bytes, ..Default::default() };
+    match at9codec::encode::encode_wav(&buf, &opts) {
         Ok(at9) => {
             if let Err(e) = std::fs::write(output, &at9) {
                 eprintln!("error: writing {output}: {e}");

@@ -14,59 +14,51 @@
 pub mod bitwriter;
 pub mod encoder;
 pub mod huffenc;
+pub mod resample;
 pub mod wavread;
 
-/// Encode a 16-bit PCM WAV buffer to a complete AT9 file. `bitrate` in bits/sec
-/// (0 = a sensible default for the channel count).
-pub fn encode_wav(wav_buf: &[u8], bitrate: u32) -> Result<Vec<u8>> {
-    let pcm = wavread::parse_wav(wav_buf)?;
-    encoder::encode_to_at9(&pcm, bitrate)
+/// Options for the encoders. Every field defaults to "automatic"/"off", so build
+/// one with [`EncodeOptions::default()`] and set only what you need.
+#[derive(Default)]
+pub struct EncodeOptions<'a> {
+    /// Target bitrate in bits/sec. `0` = a sensible default for the channel count.
+    /// Snapped to the nearest standard AT9 bitrate the hardware accepts.
+    pub bitrate: u32,
+    /// Keep the output at or under this many bytes (`0` = no cap, up to the RIFF
+    /// 4 GiB container). The encoder picks the highest standard bitrate that fits
+    /// — pass [`encoder::VITA_BGM_MAX_BYTES`] / [`encoder::PS_CROSS_BGM_MAX_BYTES`]
+    /// for console theme BGM.
+    pub max_bytes: usize,
+    /// Loop start, in decoded-PCM samples: `None` = no loop, `Some(0)` = loop the
+    /// whole track, `Some(n)` = loop from sample `n`.
+    pub loop_start: Option<u32>,
+    /// Loop end — the inclusive last sample of the loop. `None` = to the track end.
+    /// Only used when `loop_start` is set.
+    pub loop_end: Option<u32>,
+    /// Progress callback `(superframes_done, total)`. `None` = no reporting.
+    pub progress: Option<crate::ProgressFn<'a>>,
 }
 
-/// Like [`encode_wav`] with an optional loop, size cap and progress callback.
-///
-/// `loop_start`: `None` = no loop, `Some(0)` = whole-track loop, `Some(n)` = loop
-/// from sample `n` to the end. `max_bytes`: 0 = no cap, else keep the output at or
-/// under that size (pass [`encoder::VITA_BGM_MAX_BYTES`] for Vita theme BGM).
-/// See [`encoder::encode_to_at9_ex`] for `progress`.
-pub fn encode_wav_ex(
-    wav_buf: &[u8],
-    bitrate: u32,
-    loop_start: Option<u32>,
-    max_bytes: usize,
-    progress: Option<crate::ProgressFn>,
-) -> Result<Vec<u8>> {
+/// Encode a WAV buffer to a complete AT9 file. Accepts 8/16/24/32-bit integer and
+/// 32/64-bit float PCM WAV (converted to 16-bit, no resampling). See [`EncodeOptions`].
+pub fn encode_wav(wav_buf: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     let pcm = wavread::parse_wav(wav_buf)?;
-    encoder::encode_to_at9_ex(&pcm, bitrate, loop_start, max_bytes, progress)
+    encoder::encode(&pcm, opts)
 }
 
-/// Encode interleaved 16-bit PCM samples to a complete AT9 file. `bitrate` in
-/// bits/sec (0 = a sensible default).
+/// Encode interleaved 16-bit PCM samples to a complete AT9 file. See [`EncodeOptions`].
 pub fn encode_pcm16(
     samples: &[i16],
     channels: u16,
     sample_rate: u32,
-    bitrate: u32,
-) -> Result<Vec<u8>> {
-    encode_pcm16_ex(samples, channels, sample_rate, bitrate, None, 0, None)
-}
-
-/// Like [`encode_pcm16`] with an optional loop, size cap and progress callback.
-pub fn encode_pcm16_ex(
-    samples: &[i16],
-    channels: u16,
-    sample_rate: u32,
-    bitrate: u32,
-    loop_start: Option<u32>,
-    max_bytes: usize,
-    progress: Option<crate::ProgressFn>,
+    opts: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let pcm = wavread::WavPcm {
         channels,
         sample_rate,
         samples: samples.to_vec(),
     };
-    encoder::encode_to_at9_ex(&pcm, bitrate, loop_start, max_bytes, progress)
+    encoder::encode(&pcm, opts)
 }
 
 use crate::decode::tables::{
@@ -174,6 +166,7 @@ pub fn build_at9_container(
     total_samples: u32,
     encoder_delay: u32,
     loop_start: Option<u32>,
+    loop_end: Option<u32>,
 ) -> Vec<u8> {
     // fmt (WAVE_FORMAT_EXTENSIBLE + ATRAC9): 52-byte body.
     let mut fmt = Vec::with_capacity(52);
@@ -202,8 +195,12 @@ pub fn build_at9_container(
 
     // smpl: one forward loop in AT9 coords (decoded coord + delay). Only when a
     // loop is requested (the reference tool's own files omit smpl otherwise).
+    // The loop END is the INCLUSIVE last sample: default to the track's last
+    // sample (total-1) and clamp any custom end to it. An end of `total` (one
+    // past the last sample) breaks looping on hardware, so never write that.
+    let last = total_samples.saturating_sub(1);
     let start = loop_start.unwrap_or(0) + encoder_delay;
-    let end = total_samples + encoder_delay - 1;
+    let end = loop_end.map(|e| e.min(last)).unwrap_or(last) + encoder_delay;
     let mut smpl = Vec::with_capacity(60);
     smpl.extend_from_slice(&0u32.to_le_bytes()); // manufacturer
     smpl.extend_from_slice(&0u32.to_le_bytes()); // product
@@ -264,7 +261,7 @@ mod tests {
         let cfg = EncoderConfig::new(48000, 2, 144000).unwrap();
         // One superframe of zero data, just to exercise the container.
         let data = vec![0u8; cfg.superframe_bytes as usize];
-        let file = build_at9_container(&cfg, &data, 1024, 256, Some(0));
+        let file = build_at9_container(&cfg, &data, 1024, 256, Some(0), None);
         let c = crate::container::parse(&file).unwrap();
         assert_eq!(c.sample_rate, 48000);
         assert_eq!(c.channels, 2);

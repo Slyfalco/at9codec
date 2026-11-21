@@ -847,41 +847,38 @@ fn encode_stereo_frame(
 }
 
 /// PS Vita theme-BGM size limit (under 5 MB): the console won't use a theme AT9
-/// larger than this. Pass as `max_bytes` to [`encode_to_at9_ex`] for Vita theme
-/// background music.
+/// larger than this. Pass as `EncodeOptions::max_bytes` for Vita theme BGM.
 pub const VITA_BGM_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 /// Tighter 2 MiB cap for a theme BGM that must also work on PS4/PS5 (cross-console
 /// support). Pass as `max_bytes` instead of [`VITA_BGM_MAX_BYTES`] for that case.
 pub const PS_CROSS_BGM_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// Encode 16-bit PCM to a complete AT9 file at a standard bitrate (no size cap —
-/// general game AT9, up to the RIFF container's 4 GiB).
-pub fn encode_to_at9(wav: &WavPcm, bitrate: u32) -> Result<Vec<u8>> {
-    encode_to_at9_ex(wav, bitrate, None, 0, None)
-}
-
-/// Encode PCM to a complete AT9 file, with optional loop, size cap and progress.
-///
-/// `loop_start`: `None` writes no loop; `Some(0)` loops the whole track; `Some(n)`
-/// loops from sample `n` to the end (in decoded-WAV coordinates).
-/// `max_bytes`: `0` = no size limit (general AT9, up to the RIFF 4 GiB container);
-/// otherwise the output is kept at or under this many bytes by choosing the
-/// highest standard bitrate that fits — pass [`VITA_BGM_MAX_BYTES`] (or
-/// [`PS_CROSS_BGM_MAX_BYTES`]) for theme BGM. If even the lowest standard
-/// bitrate overflows the cap, the lowest
-/// is used (best effort). `progress` is called `(superframes_done, total)` from a
-/// monitor thread during the parallel encode; pass `None` to skip it.
-pub fn encode_to_at9_ex(
-    wav: &WavPcm,
-    bitrate: u32,
-    loop_start: Option<u32>,
-    max_bytes: usize,
-    progress: Option<crate::ProgressFn>,
-) -> Result<Vec<u8>> {
+/// Encode PCM to a complete AT9 file. All behaviour (bitrate, size cap, loop,
+/// progress) is driven by [`EncodeOptions`]; `&EncodeOptions::default()` gives a
+/// best-quality, no-loop, uncapped encode.
+pub fn encode(wav: &WavPcm, opts: &super::EncodeOptions) -> Result<Vec<u8>> {
+    let bitrate = opts.bitrate;
+    let max_bytes = opts.max_bytes;
+    let progress = opts.progress;
     if wav.sample_rate == 0 || wav.channels == 0 {
         return Err(Error::BadConfig);
     }
+    // Resample to a supported Vita rate (12/24/48 kHz) if the source isn't one,
+    // scaling any loop points to the new rate so they stay at the same position.
+    let src_rate = wav.sample_rate;
+    let owned;
+    let (wav, loop_start, loop_end) = if super::resample::is_supported(src_rate) {
+        (wav, opts.loop_start, opts.loop_end)
+    } else {
+        let tr = super::resample::target_rate(src_rate);
+        owned = super::resample::resample(wav, tr);
+        (
+            &owned,
+            opts.loop_start.map(|s| super::resample::scale_index(s, src_rate, tr)),
+            opts.loop_end.map(|e| super::resample::scale_index(e, src_rate, tr)),
+        )
+    };
     let channels = wav.channels as usize;
     let total_samples = (wav.samples.len() / channels) as u32;
     let sri = SAMPLE_RATES
@@ -1058,7 +1055,7 @@ pub fn encode_to_at9_ex(
         frames_per_superframe: FRAMES_PER_SUPERFRAME,
         superframe_bytes: superframe_bytes as u32,
     };
-    Ok(build_at9_container(&config, &data, total_samples, ENCODER_DELAY, loop_start))
+    Ok(build_at9_container(&config, &data, total_samples, ENCODER_DELAY, loop_start, loop_end))
 }
 
 #[cfg(test)]
@@ -1078,7 +1075,7 @@ mod tests {
             samples.push(r);
         }
         let wav = WavPcm { channels: 2, sample_rate: sr, samples: samples.clone() };
-        let at9 = encode_to_at9(&wav, 0).unwrap();
+        let at9 = encode(&wav, &crate::encode::EncodeOptions::default()).unwrap();
 
         // Must decode with our decoder and stay at a standard bitrate.
         let c = crate::container::parse(&at9).unwrap();

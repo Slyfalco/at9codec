@@ -276,14 +276,16 @@ pub fn parse(buf: &[u8]) -> Result<Container> {
 
     // Convert AT9-coord loop points to decoded-WAV coords (strip the delay).
     let loop_info = match (smpl_start, smpl_end) {
-        (Some(s), Some(_e)) => {
+        (Some(s), Some(e)) => {
             let start = s.saturating_sub(encoder_delay);
-            // The loop always ends at the true end of the audio.
-            let end = total_samples;
+            // Loop end is the inclusive last sample in decoded coords. A custom
+            // end is honoured; a whole-track loop ends at the last sample (total-1).
+            let last = total_samples.saturating_sub(1);
+            let end = e.saturating_sub(encoder_delay).min(last);
             Some(LoopInfo {
                 start,
                 end,
-                is_whole: start == 0,
+                is_whole: start == 0 && end >= last,
             })
         }
         _ => None,

@@ -4,6 +4,10 @@
  * Link against the shared library (at9codec.dll / libat9codec.so /
  * libat9codec.dylib). No CLI or external tool is required.
  *
+ * Optional behaviour is passed through small options structs: zero-initialize one,
+ * set its struct_size and only the fields you need, and pass its address — or pass
+ * NULL for all defaults. New fields can be appended later without breaking callers.
+ *
  * Memory ownership: functions that produce a buffer allocate it inside the
  * library and write a pointer + length to the caller's out-parameters. Release
  * each such buffer with the matching at9_free_* function — never with your own
@@ -29,6 +33,23 @@ extern "C" {
 #define AT9_ERR_DECODE -3  /* decoding failed                                 */
 #define AT9_ERR_ENCODE -4  /* encoding failed (e.g. unsupported sample rate)  */
 
+/*
+ * Theme-BGM size caps (bytes) for At9EncodeOptions.max_bytes. The PS Vita won't
+ * use a theme AT9 larger than ~5 MB; a theme that must also run on PS4/PS5 is
+ * capped tighter at 2 MiB. General game AT9 has no cap (leave max_bytes = 0).
+ */
+#define AT9_VITA_BGM_MAX_BYTES     ((size_t)5u * 1024u * 1024u)
+#define AT9_PS_CROSS_BGM_MAX_BYTES ((size_t)2u * 1024u * 1024u)
+
+/*
+ * Progress callback: (user, units_done, units_total). One unit is one superframe.
+ * Invoked from a single thread (a dedicated monitor thread during encode, the
+ * decode thread during decode), never concurrently, so it need not be re-entrant.
+ * Keep it cheap. Leave the options' progress field NULL for no reporting (then no
+ * monitor thread is spawned — zero overhead).
+ */
+typedef void (*At9ProgressCb)(void *user, uint32_t done, uint32_t total);
+
 /* Container metadata filled by at9_parse_info(). */
 typedef struct {
     uint32_t sample_rate;
@@ -41,18 +62,27 @@ typedef struct {
     uint32_t superframe_count;
     uint32_t has_loop;               /* 1 if a loop is defined, else 0        */
     uint32_t loop_start;             /* decoded-WAV sample coords (if has_loop)*/
-    uint32_t loop_end;
+    uint32_t loop_end;               /* inclusive last sample of the loop      */
     uint32_t is_whole_loop;
 } At9Info;
 
-/*
- * Progress callback: (user, units_done, units_total). One unit is one superframe.
- * It is invoked from a single thread (a dedicated monitor thread during encode,
- * the decode thread during decode), never concurrently, so it need not be
- * re-entrant. Keep it cheap. Pass NULL to the _ex functions for no reporting
- * (then no monitor thread is spawned — zero overhead).
- */
-typedef void (*At9ProgressCb)(void *user, uint32_t done, uint32_t total);
+/* Options for at9_decode(). Zero-init, set struct_size, pass NULL for defaults. */
+typedef struct {
+    uint32_t      struct_size;   /* = sizeof(At9DecodeOptions)                 */
+    At9ProgressCb progress;      /* NULL = no progress reporting               */
+    void         *user;          /* passed back to progress                    */
+} At9DecodeOptions;
+
+/* Options for at9_encode()/at9_encode_wav(). Zero-init, set struct_size. */
+typedef struct {
+    uint32_t      struct_size;   /* = sizeof(At9EncodeOptions)                 */
+    uint32_t      bitrate;       /* bits/sec; 0 = best standard default        */
+    size_t        max_bytes;     /* 0 = no cap; else AT9_*_BGM_MAX_BYTES        */
+    int32_t       loop_start;    /* <0 none; 0 whole track; >0 from this sample */
+    int32_t       loop_end;      /* <=0 to track end; >0 inclusive last sample  */
+    At9ProgressCb progress;      /* NULL = no progress reporting               */
+    void         *user;
+} At9EncodeOptions;
 
 /* Null-terminated version string, valid for the life of the library. */
 const char *at9_version(void);
@@ -62,72 +92,38 @@ int32_t at9_parse_info(const uint8_t *data, size_t len, At9Info *out);
 
 /*
  * Decode an AT9 file to interleaved 16-bit PCM.
- * On AT9_OK: *out_pcm points to *out_count int16_t samples (frames*channels),
- * and *out_channels / *out_sample_rate hold the format. Free with at9_free_pcm.
+ * opts may be NULL (defaults). On AT9_OK: *out_pcm points to *out_count int16_t
+ * samples (frames*channels), and *out_channels / *out_sample_rate hold the format.
+ * Free with at9_free_pcm.
  */
 int32_t at9_decode(const uint8_t *at9, size_t at9_len,
+                   const At9DecodeOptions *opts,
                    int16_t **out_pcm, size_t *out_count,
                    uint16_t *out_channels, uint32_t *out_sample_rate);
 
-/*
- * Like at9_decode(), but reports progress via cb/user (one call per superframe).
- * Pass cb = NULL for no reporting (identical to at9_decode()).
- */
-int32_t at9_decode_ex(const uint8_t *at9, size_t at9_len,
-                      At9ProgressCb cb, void *user,
-                      int16_t **out_pcm, size_t *out_count,
-                      uint16_t *out_channels, uint32_t *out_sample_rate);
-
-/* Free a buffer returned by at9_decode()/at9_decode_ex(). count = *out_count. */
+/* Free a buffer returned by at9_decode(). count = *out_count. */
 void at9_free_pcm(int16_t *pcm, size_t count);
 
 /*
  * Encode interleaved 16-bit PCM to an AT9 file (RIFF/WAVE).
- * sample_rate must be 12000, 24000 or 48000. bitrate is in bits/sec; pass 0 for
- * a sensible default. On AT9_OK: *out_at9 points to *out_len bytes; free with
- * at9_free_at9.
+ * sample_rate must be 12000, 24000 or 48000. opts may be NULL (defaults).
+ * On AT9_OK: *out_at9 points to *out_len bytes; free with at9_free_at9.
  */
 int32_t at9_encode(const int16_t *pcm, size_t sample_count,
-                   uint16_t channels, uint32_t sample_rate, uint32_t bitrate,
+                   uint16_t channels, uint32_t sample_rate,
+                   const At9EncodeOptions *opts,
                    uint8_t **out_at9, size_t *out_len);
 
 /*
  * Encode a WAV file buffer to an AT9 file. Accepts 8/16/24/32-bit integer and
  * 32/64-bit float PCM WAV (converted to 16-bit internally, no resampling).
- * Free the result with at9_free_at9.
+ * opts may be NULL. Free the result with at9_free_at9.
  */
-int32_t at9_encode_wav(const uint8_t *wav, size_t wav_len, uint32_t bitrate,
+int32_t at9_encode_wav(const uint8_t *wav, size_t wav_len,
+                       const At9EncodeOptions *opts,
                        uint8_t **out_at9, size_t *out_len);
 
-/*
- * Theme-BGM size caps for the max_bytes argument below. The Vita won't use a
- * theme AT9 larger than ~5 MB; a theme that must also run on PS4/PS5 is capped
- * tighter at 2 MiB. General game AT9 has no cap (pass max_bytes = 0).
- */
-#define AT9_VITA_BGM_MAX_BYTES     (5u * 1024u * 1024u)
-#define AT9_PS_CROSS_BGM_MAX_BYTES  (2u * 1024u * 1024u)
-
-/*
- * Like at9_encode()/at9_encode_wav(), with loop points, a size cap and progress.
- * loop_start: negative = no loop; 0 = whole-track loop; positive = loop from that
- * sample index to the end (decoded-PCM coordinates).
- * max_bytes: 0 = no size cap (general AT9, up to the RIFF 4 GiB container); else
- * the output is kept at or under that many bytes by choosing the highest standard
- * bitrate that fits (pass AT9_VITA_BGM_MAX_BYTES or AT9_PS_CROSS_BGM_MAX_BYTES for
- * theme BGM). cb/user as above (NULL = none).
- */
-int32_t at9_encode_ex(const int16_t *pcm, size_t sample_count,
-                      uint16_t channels, uint32_t sample_rate, uint32_t bitrate,
-                      int32_t loop_start, size_t max_bytes,
-                      At9ProgressCb cb, void *user,
-                      uint8_t **out_at9, size_t *out_len);
-
-int32_t at9_encode_wav_ex(const uint8_t *wav, size_t wav_len, uint32_t bitrate,
-                          int32_t loop_start, size_t max_bytes,
-                          At9ProgressCb cb, void *user,
-                          uint8_t **out_at9, size_t *out_len);
-
-/* Free a buffer returned by any at9_encode* function. len = *out_len. */
+/* Free a buffer returned by at9_encode()/at9_encode_wav(). len = *out_len. */
 void at9_free_at9(uint8_t *at9, size_t len);
 
 #ifdef __cplusplus
