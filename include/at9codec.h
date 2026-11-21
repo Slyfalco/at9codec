@@ -33,11 +33,22 @@ extern "C" {
 #define AT9_ERR_DECODE -3  /* decoding failed                                 */
 #define AT9_ERR_ENCODE -4  /* encoding failed (e.g. unsupported sample rate)  */
 #define AT9_ERR_BITRATE -5 /* bitrate is not a standard rate; use 0 for auto  */
+#define AT9_ERR_TOO_LARGE -6 /* too long to fit the size limit at any bitrate */
 
 /*
- * Theme-BGM size caps (bytes) for At9EncodeOptions.max_bytes. The PS Vita won't
- * use a theme AT9 larger than ~5 MB; a theme that must also run on PS4/PS5 is
- * capped tighter at 2 MiB. General game AT9 has no cap (leave max_bytes = 0).
+ * Size profiles for At9EncodeOptions.size_profile. Naming a console target makes
+ * the codec apply its own byte cap for it (and ignore max_bytes), so callers never
+ * hard-code the limits: the Vita won't use a theme AT9 over ~5 MB, and a theme that
+ * must also run on PS4/PS5 is capped tighter at 2 MiB. 0 = use max_bytes.
+ */
+#define AT9_SIZE_NONE     0u
+#define AT9_SIZE_VITA_BGM 1u
+#define AT9_SIZE_PS_CROSS 2u
+
+/*
+ * The raw byte caps, if you need the numbers directly (e.g. to size-check an
+ * existing AT9). Prefer size_profile for encoding. at9_profile_max_bytes() returns
+ * the same values from the library, so non-C callers need not hard-code them.
  */
 #define AT9_VITA_BGM_MAX_BYTES     ((size_t)5u * 1024u * 1024u)
 #define AT9_PS_CROSS_BGM_MAX_BYTES ((size_t)2u * 1024u * 1024u)
@@ -78,15 +89,22 @@ typedef struct {
 typedef struct {
     uint32_t      struct_size;   /* = sizeof(At9EncodeOptions)                 */
     uint32_t      bitrate;       /* bits/sec; 0 = best standard default        */
-    size_t        max_bytes;     /* 0 = no cap; else AT9_*_BGM_MAX_BYTES        */
+    size_t        max_bytes;     /* custom cap; 0 = none; ignored if profile set*/
     int32_t       loop_start;    /* <0 none; 0 whole track; >0 from this sample */
     int32_t       loop_end;      /* <=0 to track end; >0 inclusive last sample  */
     At9ProgressCb progress;      /* NULL = no progress reporting               */
     void         *user;
+    uint32_t      size_profile;  /* AT9_SIZE_*; non-zero overrides max_bytes    */
 } At9EncodeOptions;
 
 /* Null-terminated version string, valid for the life of the library. */
 const char *at9_version(void);
+
+/*
+ * Byte cap the codec uses for a size profile (AT9_SIZE_*); 0 = no cap/unknown.
+ * Lets non-C callers read the console limits instead of hard-coding them.
+ */
+size_t at9_profile_max_bytes(uint32_t size_profile);
 
 /* Parse an AT9 file's header into *out. Returns AT9_OK or a negative code. */
 int32_t at9_parse_info(const uint8_t *data, size_t len, At9Info *out);

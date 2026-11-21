@@ -6,7 +6,7 @@
 //
 //   val at9 = At9Codec.encodeWav(wavBytes,
 //                                loopStart = 0,                       // whole-track loop
-//                                maxBytes = At9Codec.VITA_BGM_MAX_BYTES,
+//                                sizeProfile = At9Codec.SIZE_VITA_BGM, // codec owns the limit
 //                                progress = { d, t -> println("$d/$t") })
 //   val (pcm, channels, rate) = At9Codec.decode(at9)
 
@@ -37,7 +37,7 @@ open class DecodeOptions : Structure() {
     @JvmField var user: Pointer? = null
 }
 
-@Structure.FieldOrder("struct_size", "bitrate", "max_bytes", "loop_start", "loop_end", "progress", "user")
+@Structure.FieldOrder("struct_size", "bitrate", "max_bytes", "loop_start", "loop_end", "progress", "user", "size_profile")
 open class EncodeOptions : Structure() {
     @JvmField var struct_size = 0
     @JvmField var bitrate = 0
@@ -46,6 +46,7 @@ open class EncodeOptions : Structure() {
     @JvmField var loop_end = 0
     @JvmField var progress: ProgressCb? = null
     @JvmField var user: Pointer? = null
+    @JvmField var size_profile = 0
 }
 
 private interface Lib : Library {
@@ -57,6 +58,7 @@ private interface Lib : Library {
     fun at9_encode_wav(wav: ByteArray, len: SizeT, opts: EncodeOptions?,
                        outAt9: PointerByReference, outLen: SizeTByReference): Int
     fun at9_free_at9(at9: Pointer, len: SizeT)
+    fun at9_profile_max_bytes(sizeProfile: Int): SizeT
 }
 
 // JNA has no built-in ShortByReference; provide a minimal one for out uint16.
@@ -66,13 +68,20 @@ class ShortByReferenceJNA(value: Short = 0) : ByReference(2) {
 }
 
 object At9Codec {
-    const val VITA_BGM_MAX_BYTES = 5L * 1024 * 1024
-    const val PS_CROSS_BGM_MAX_BYTES = 2L * 1024 * 1024
+    // Size profiles: name a console target and the codec applies its own byte cap.
+    const val SIZE_NONE = 0
+    const val SIZE_VITA_BGM = 1   // PS Vita system/theme BGM (under 5 MB)
+    const val SIZE_PS_CROSS = 2   // tighter 2 MiB cap for PS4/PS5 cross-support
     private const val AT9_OK = 0
+    private const val AT9_ERR_TOO_LARGE = -6
 
     private val lib: Lib = Native.load("at9codec", Lib::class.java)
 
     fun version(): String = lib.at9_version()
+
+    /** The codec's byte cap for a size profile (SIZE_*); 0 = no cap/unknown. Reads
+     *  the limit from the library so you never hard-code the console numbers. */
+    fun profileMaxBytes(sizeProfile: Int): Long = lib.at9_profile_max_bytes(sizeProfile).toLong()
 
     data class Decoded(val pcm: ByteArray, val channels: Int, val sampleRate: Int)
 
@@ -99,10 +108,11 @@ object At9Codec {
 
     /**
      * Encode a WAV buffer to AT9. loopStart: <0 none, 0 whole track, >0 from sample.
-     * loopEnd: <=0 to track end, >0 inclusive last sample. maxBytes: 0 uncapped.
+     * loopEnd: <=0 to track end, >0 inclusive last sample. sizeProfile: SIZE_VITA_BGM /
+     * SIZE_PS_CROSS to let the codec apply its own cap; SIZE_NONE uses maxBytes (0 = uncapped).
      */
-    fun encodeWav(wav: ByteArray, bitrate: Int = 0, maxBytes: Long = 0,
-                  loopStart: Int = -1, loopEnd: Int = 0,
+    fun encodeWav(wav: ByteArray, bitrate: Int = 0, sizeProfile: Int = SIZE_NONE,
+                  maxBytes: Long = 0, loopStart: Int = -1, loopEnd: Int = 0,
                   progress: ((Int, Int) -> Unit)? = null): ByteArray {
         val opts = EncodeOptions().apply {
             struct_size = size()
@@ -110,11 +120,13 @@ object At9Codec {
             this.max_bytes = SizeT(maxBytes)
             this.loop_start = loopStart
             this.loop_end = loopEnd
+            this.size_profile = sizeProfile
             if (progress != null) this.progress = ProgressCb { _, d, t -> progress(d, t) }
         }
         val out = PointerByReference()
         val outLen = SizeTByReference()
         val rc = lib.at9_encode_wav(wav, SizeT(wav.size.toLong()), opts, out, outLen)
+        if (rc == AT9_ERR_TOO_LARGE) throw RuntimeException("track too long to fit the size limit")
         if (rc != AT9_OK) throw RuntimeException("at9_encode_wav failed: $rc")
         try {
             return out.value.getByteArray(0, outLen.getValue().toInt())

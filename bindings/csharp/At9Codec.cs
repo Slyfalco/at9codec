@@ -6,7 +6,7 @@
 //
 //   byte[] at9 = At9Codec.EncodeWav(File.ReadAllBytes("in.wav"),
 //                                   loopStart: 0,                       // whole-track loop
-//                                   maxBytes: At9Codec.VitaBgmMaxBytes,
+//                                   sizeProfile: At9Codec.SizeVitaBgm,  // codec owns the limit
 //                                   progress: (d, t) => Console.Write($"\r{d}/{t}"));
 //   File.WriteAllBytes("out.at9", at9);
 //   var (pcm, channels, rate) = At9Codec.Decode(at9);
@@ -17,8 +17,13 @@ using System.Runtime.InteropServices;
 public static class At9Codec
 {
     public const int AT9_OK = 0;
-    public const nuint VitaBgmMaxBytes = 5u * 1024u * 1024u;
-    public const nuint PsCrossBgmMaxBytes = 2u * 1024u * 1024u;
+    public const int AT9_ERR_BITRATE = -5;    // bitrate is not a standard rate
+    public const int AT9_ERR_TOO_LARGE = -6;  // too long to fit the size limit
+
+    // Size profiles: name a console target and the codec applies its own byte cap.
+    public const uint SizeNone = 0;
+    public const uint SizeVitaBgm = 1;   // PS Vita system/theme BGM (under 5 MB)
+    public const uint SizePsCross = 2;   // tighter 2 MiB cap for PS4/PS5
 
     public delegate void ProgressCb(IntPtr user, uint done, uint total);
 
@@ -40,6 +45,7 @@ public static class At9Codec
         public int LoopEnd;
         public IntPtr Progress;
         public IntPtr User;
+        public uint SizeProfile;
     }
 
     [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
@@ -59,7 +65,13 @@ public static class At9Codec
     [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
     private static extern void at9_free_at9(IntPtr at9, nuint len);
 
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint at9_profile_max_bytes(uint sizeProfile);
+
     public static string Version() => Marshal.PtrToStringAnsi(at9_version()) ?? "";
+
+    /// <summary>The codec's byte cap for a size profile (Size*); 0 = no cap/unknown.</summary>
+    public static ulong ProfileMaxBytes(uint sizeProfile) => at9_profile_max_bytes(sizeProfile);
 
     /// <summary>Decode AT9 bytes to interleaved little-endian 16-bit PCM.</summary>
     public static (byte[] pcm, int channels, int sampleRate) Decode(byte[] at9, ProgressCb? progress = null)
@@ -86,10 +98,11 @@ public static class At9Codec
 
     /// <summary>
     /// Encode a WAV buffer to AT9. loopStart: &lt;0 none, 0 whole track, &gt;0 from sample.
-    /// loopEnd: &lt;=0 to track end, &gt;0 inclusive last sample. maxBytes: 0 uncapped.
+    /// loopEnd: &lt;=0 to track end, &gt;0 inclusive last sample. sizeProfile: SizeVitaBgm /
+    /// SizePsCross to let the codec apply its own cap; SizeNone uses maxBytes (0 = uncapped).
     /// </summary>
-    public static byte[] EncodeWav(byte[] wav, uint bitrate = 0, nuint maxBytes = 0,
-        int loopStart = -1, int loopEnd = 0, ProgressCb? progress = null)
+    public static byte[] EncodeWav(byte[] wav, uint bitrate = 0, uint sizeProfile = SizeNone,
+        nuint maxBytes = 0, int loopStart = -1, int loopEnd = 0, ProgressCb? progress = null)
     {
         var cb = progress;
         var opts = new EncodeOptions
@@ -101,8 +114,10 @@ public static class At9Codec
             LoopEnd = loopEnd,
             Progress = cb == null ? IntPtr.Zero : Marshal.GetFunctionPointerForDelegate(cb),
             User = IntPtr.Zero,
+            SizeProfile = sizeProfile,
         };
         int rc = at9_encode_wav(wav, (nuint)wav.Length, in opts, out IntPtr outAt9, out nuint outLen);
+        if (rc == AT9_ERR_TOO_LARGE) throw new Exception("at9_encode_wav: track too long to fit the size limit");
         if (rc != AT9_OK) throw new Exception($"at9_encode_wav failed: {rc}");
         try
         {

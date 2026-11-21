@@ -21,6 +21,17 @@ pub const AT9_ERR_ENCODE: i32 = -4;
 /// channel count and sample rate. Use 0 in `At9EncodeOptions::bitrate` for auto
 /// (the encoder picks the best standard rate that fits any size cap).
 pub const AT9_ERR_BITRATE: i32 = -5;
+/// The audio is too long to fit the requested size limit even at the lowest
+/// standard bitrate — shorten the track or relax the limit.
+pub const AT9_ERR_TOO_LARGE: i32 = -6;
+
+/// `At9EncodeOptions::size_profile` values. Naming a target makes the codec apply
+/// its own byte cap for that console (and ignore `max_bytes`). `0` = use `max_bytes`.
+pub const AT9_SIZE_NONE: u32 = 0;
+/// PS Vita system/theme BGM limit (under 5 MB).
+pub const AT9_SIZE_VITA_BGM: u32 = 1;
+/// Tighter 2 MiB limit for a theme BGM that must also run on PS4/PS5.
+pub const AT9_SIZE_PS_CROSS: u32 = 2;
 
 /// Progress callback: `(user, units_done, units_total)`. One unit = one
 /// superframe. Invoked from a single thread (a dedicated monitor thread for
@@ -89,8 +100,8 @@ pub struct At9EncodeOptions {
     pub struct_size: u32,
     /// Target bitrate (bits/sec); `0` = best standard default for the channels.
     pub bitrate: u32,
-    /// Keep the output at or under this many bytes; `0` = no cap. See the
-    /// `AT9_*_BGM_MAX_BYTES` constants.
+    /// Custom size cap in bytes; `0` = no cap. Ignored when `size_profile` names a
+    /// console target. Prefer `size_profile` for the console limits.
     pub max_bytes: usize,
     /// Loop start in decoded-PCM samples: `< 0` = no loop, `0` = whole track,
     /// `> 0` = loop from that sample.
@@ -101,6 +112,10 @@ pub struct At9EncodeOptions {
     /// Progress callback `(user, done, total)` in superframes; `NULL` = none.
     pub progress: Option<At9ProgressCb>,
     pub user: *mut c_void,
+    /// Named size limit (`AT9_SIZE_*`). When non-zero the codec applies its own byte
+    /// cap for that console and ignores `max_bytes`; `0` = use `max_bytes`. Trailing
+    /// field: a caller with an older/smaller `struct_size` that omits it gets `0`.
+    pub size_profile: u32,
 }
 
 /// Null-terminated library version string. Valid for the life of the library.
@@ -211,9 +226,12 @@ pub unsafe extern "C" fn at9_free_pcm(pcm: *mut i16, count: usize) {
 
 /// Build a Rust [`crate::encode::EncodeOptions`] from the C struct (minus the
 /// progress closure, which borrows and must be built in the calling frame).
-unsafe fn enc_opts_scalars(opts: *const At9EncodeOptions) -> (u32, usize, Option<u32>, Option<u32>) {
+unsafe fn enc_opts_scalars(
+    opts: *const At9EncodeOptions,
+) -> (u32, crate::encode::SizeLimit, Option<u32>, Option<u32>) {
+    use crate::encode::SizeLimit;
     if opts.is_null() {
-        return (0, 0, None, None);
+        return (0, SizeLimit::None, None, None);
     }
     let o = &*opts;
     let loop_start = if o.loop_start < 0 { None } else { Some(o.loop_start as u32) };
@@ -222,7 +240,31 @@ unsafe fn enc_opts_scalars(opts: *const At9EncodeOptions) -> (u32, usize, Option
     } else {
         None
     };
-    (o.bitrate, o.max_bytes, loop_start, loop_end)
+    // size_profile is a trailing field; a caller with an older, smaller struct_size
+    // that doesn't include it is treated as AT9_SIZE_NONE.
+    let covers_profile = (o.struct_size as usize)
+        >= core::mem::offset_of!(At9EncodeOptions, size_profile) + core::mem::size_of::<u32>();
+    let profile = if covers_profile { o.size_profile } else { AT9_SIZE_NONE };
+    let size_limit = match profile {
+        AT9_SIZE_VITA_BGM => SizeLimit::VitaSystemBgm,
+        AT9_SIZE_PS_CROSS => SizeLimit::PsCross,
+        _ if o.max_bytes > 0 => SizeLimit::Bytes(o.max_bytes),
+        _ => SizeLimit::None,
+    };
+    (o.bitrate, size_limit, loop_start, loop_end)
+}
+
+/// The codec's byte cap for a size profile (`AT9_SIZE_*`); `0` = no cap / unknown.
+/// Lets non-C callers read the console limits from the codec instead of hard-coding
+/// them (e.g. to size-check a pre-made AT9 before using it).
+#[no_mangle]
+pub extern "C" fn at9_profile_max_bytes(size_profile: u32) -> usize {
+    use crate::encode::SizeLimit;
+    match size_profile {
+        AT9_SIZE_VITA_BGM => SizeLimit::VitaSystemBgm.max_bytes(),
+        AT9_SIZE_PS_CROSS => SizeLimit::PsCross.max_bytes(),
+        _ => 0,
+    }
 }
 
 /// Encode interleaved 16-bit PCM to an AT9 file (RIFF/WAVE). `opts` may be `NULL`
@@ -246,7 +288,7 @@ pub unsafe extern "C" fn at9_encode(
         return AT9_ERR_NULL;
     }
     let samples = std::slice::from_raw_parts(pcm, sample_count);
-    let (bitrate, max_bytes, loop_start, loop_end) = enc_opts_scalars(opts);
+    let (bitrate, size_limit, loop_start, loop_end) = enc_opts_scalars(opts);
     let ctx = if opts.is_null() {
         None
     } else {
@@ -255,7 +297,7 @@ pub unsafe extern "C" fn at9_encode(
     let closure = ctx.as_ref().map(|c| move |d, t| unsafe { (c.cb)(c.user, d, t) });
     let eopts = crate::encode::EncodeOptions {
         bitrate,
-        max_bytes,
+        size_limit,
         loop_start,
         loop_end,
         progress: closure.as_ref().map(|f| f as &(dyn Fn(u32, u32) + Sync)),
@@ -268,6 +310,7 @@ pub unsafe extern "C" fn at9_encode(
             AT9_OK
         }
         Err(crate::error::Error::InvalidBitrate) => AT9_ERR_BITRATE,
+        Err(crate::error::Error::ExceedsSizeLimit) => AT9_ERR_TOO_LARGE,
         Err(_) => AT9_ERR_ENCODE,
     }
 }
@@ -291,7 +334,7 @@ pub unsafe extern "C" fn at9_encode_wav(
         return AT9_ERR_NULL;
     }
     let buf = std::slice::from_raw_parts(wav, wav_len);
-    let (bitrate, max_bytes, loop_start, loop_end) = enc_opts_scalars(opts);
+    let (bitrate, size_limit, loop_start, loop_end) = enc_opts_scalars(opts);
     let ctx = if opts.is_null() {
         None
     } else {
@@ -300,7 +343,7 @@ pub unsafe extern "C" fn at9_encode_wav(
     let closure = ctx.as_ref().map(|c| move |d, t| unsafe { (c.cb)(c.user, d, t) });
     let eopts = crate::encode::EncodeOptions {
         bitrate,
-        max_bytes,
+        size_limit,
         loop_start,
         loop_end,
         progress: closure.as_ref().map(|f| f as &(dyn Fn(u32, u32) + Sync)),
@@ -313,6 +356,7 @@ pub unsafe extern "C" fn at9_encode_wav(
             AT9_OK
         }
         Err(crate::error::Error::InvalidBitrate) => AT9_ERR_BITRATE,
+        Err(crate::error::Error::ExceedsSizeLimit) => AT9_ERR_TOO_LARGE,
         Err(_) => AT9_ERR_ENCODE,
     }
 }

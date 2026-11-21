@@ -7,7 +7,7 @@ options-struct C API with idiomatic helpers:
     pcm, channels, rate = a9.decode(open("in.at9", "rb").read())
     blob = a9.encode_wav(open("in.wav", "rb").read(),
                          loop=(0, None),               # whole-track loop
-                         max_bytes=a9.VITA_BGM_MAX_BYTES,
+                         size_profile=a9.SIZE_VITA_BGM,  # codec owns the limit
                          progress=lambda d, t: print(f"{d}/{t}"))
     open("out.at9", "wb").write(blob)
 
@@ -20,8 +20,13 @@ import os
 import sys
 
 AT9_OK = 0
-VITA_BGM_MAX_BYTES = 5 * 1024 * 1024
-PS_CROSS_BGM_MAX_BYTES = 2 * 1024 * 1024
+AT9_ERR_BITRATE = -5    # bitrate is not a standard rate (use 0 = auto)
+AT9_ERR_TOO_LARGE = -6  # too long to fit the size limit at any standard bitrate
+
+# Size profiles: name a console target and the codec applies its own byte cap.
+SIZE_NONE = 0
+SIZE_VITA_BGM = 1       # PS Vita system/theme BGM (under 5 MB)
+SIZE_PS_CROSS = 2       # tighter 2 MiB cap for PS4/PS5 cross-support
 
 _ProgressCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32)
 
@@ -39,7 +44,8 @@ class _EncodeOptions(ctypes.Structure):
                 ("loop_start", ctypes.c_int32),
                 ("loop_end", ctypes.c_int32),
                 ("progress", _ProgressCb),
-                ("user", ctypes.c_void_p)]
+                ("user", ctypes.c_void_p),
+                ("size_profile", ctypes.c_uint32)]
 
 
 def _default_lib_name():
@@ -79,6 +85,8 @@ def _load(path=None):
     lib.at9_encode_wav.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_EncodeOptions),
                                    ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), ctypes.POINTER(ctypes.c_size_t)]
     lib.at9_free_at9.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+    lib.at9_profile_max_bytes.restype = ctypes.c_size_t
+    lib.at9_profile_max_bytes.argtypes = [ctypes.c_uint32]
     return lib
 
 
@@ -124,13 +132,20 @@ def decode(at9_bytes, progress=None):
     return pcm, int(ch.value), int(sr.value)
 
 
-def encode_wav(wav_bytes, bitrate=0, max_bytes=0, loop=None, progress=None):
+def profile_max_bytes(size_profile):
+    """The codec's byte cap for a size profile (SIZE_*); 0 = no cap/unknown. Reads
+    the limit from the library so you never hard-code the console numbers."""
+    return int(_lib_handle().at9_profile_max_bytes(size_profile))
+
+
+def encode_wav(wav_bytes, bitrate=0, size_profile=SIZE_NONE, max_bytes=0,
+               loop=None, progress=None):
     """Encode a WAV file (bytes) to AT9 bytes.
 
     loop: None = no loop; a (start, end) tuple where start is 0 for a whole-track
     loop or a sample index, and end is None (to track end) or an inclusive last
-    sample. max_bytes: 0 = uncapped; VITA_BGM_MAX_BYTES / PS_CROSS_BGM_MAX_BYTES
-    for theme BGM."""
+    sample. size_profile: SIZE_VITA_BGM / SIZE_PS_CROSS to let the codec apply its
+    own console size cap; SIZE_NONE (default) uses max_bytes (0 = uncapped)."""
     lib = _lib_handle()
     cb = _wrap(progress)
     if loop is None:
@@ -140,11 +155,14 @@ def encode_wav(wav_bytes, bitrate=0, max_bytes=0, loop=None, progress=None):
         ls = int(start)
         le = int(end) if end else 0
     opts = _EncodeOptions(struct_size=ctypes.sizeof(_EncodeOptions), bitrate=bitrate,
-                          max_bytes=max_bytes, loop_start=ls, loop_end=le, progress=cb, user=None)
+                          max_bytes=max_bytes, loop_start=ls, loop_end=le, progress=cb,
+                          user=None, size_profile=size_profile)
     out = ctypes.POINTER(ctypes.c_uint8)()
     n = ctypes.c_size_t()
     rc = lib.at9_encode_wav(wav_bytes, len(wav_bytes), ctypes.byref(opts),
                             ctypes.byref(out), ctypes.byref(n))
+    if rc == AT9_ERR_TOO_LARGE:
+        raise RuntimeError("at9_encode_wav: track too long to fit the size limit")
     if rc != AT9_OK:
         raise RuntimeError(f"at9_encode_wav failed: {rc}")
     try:

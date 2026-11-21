@@ -22,6 +22,9 @@ pub enum Error {
     /// rate for the stream's channel count and sample rate. Use 0 (auto) or one
     /// of [`crate::encode::encoder::standard_bitrates`].
     InvalidBitrate,
+    /// A size limit was set but the audio is too long to fit it even at the lowest
+    /// standard bitrate — shorten the track or raise the limit.
+    ExceedsSizeLimit,
     /// Feature not yet implemented (e.g. decode/encode in progress).
     NotImplemented(&'static str),
 }
@@ -36,6 +39,9 @@ impl fmt::Display for Error {
             Error::BadConfig => write!(f, "invalid ATRAC9 config data"),
             Error::InvalidBitrate => {
                 write!(f, "bitrate is not a standard ATRAC9 rate for this stream")
+            }
+            Error::ExceedsSizeLimit => {
+                write!(f, "audio is too long to fit the size limit at any standard bitrate")
             }
             Error::NotImplemented(w) => write!(f, "not implemented yet: {w}"),
         }

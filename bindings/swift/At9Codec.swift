@@ -6,7 +6,7 @@
 //
 //   let at9 = try At9Codec.encodeWav(wavData,
 //                                    loopStart: 0,                       // whole-track loop
-//                                    maxBytes: At9Codec.vitaBgmMaxBytes,
+//                                    sizeProfile: At9Codec.sizeVitaBgm,  // codec owns the limit
 //                                    progress: { d, t in print("\(d)/\(t)") })
 //   let (pcm, channels, rate) = try At9Codec.decode(at9)
 
@@ -16,10 +16,18 @@ import CAt9Codec
 public enum At9CodecError: Error { case failed(Int32) }
 
 public enum At9Codec {
-    public static let vitaBgmMaxBytes = 5 * 1024 * 1024
-    public static let psCrossBgmMaxBytes = 2 * 1024 * 1024
+    // Size profiles: name a console target and the codec applies its own byte cap.
+    public static let sizeNone: UInt32 = 0
+    public static let sizeVitaBgm: UInt32 = 1   // PS Vita system/theme BGM (under 5 MB)
+    public static let sizePsCross: UInt32 = 2   // tighter 2 MiB cap for PS4/PS5
 
     public static func version() -> String { String(cString: at9_version()) }
+
+    /// The codec's byte cap for a size profile (`size*`); 0 = no cap/unknown. Reads
+    /// the limit from the library so you never hard-code the console numbers.
+    public static func profileMaxBytes(_ sizeProfile: UInt32) -> Int {
+        at9_profile_max_bytes(sizeProfile)
+    }
 
     // Holds a Swift progress closure so it can be reached from the C callback
     // through the options' `user` pointer.
@@ -61,9 +69,11 @@ public enum At9Codec {
     }
 
     /// Encode a WAV buffer to AT9. loopStart: <0 none, 0 whole track, >0 from sample.
-    /// loopEnd: <=0 to track end, >0 inclusive last sample. maxBytes: 0 uncapped.
+    /// loopEnd: <=0 to track end, >0 inclusive last sample. sizeProfile: sizeVitaBgm /
+    /// sizePsCross to let the codec apply its own cap; sizeNone uses maxBytes (0 = uncapped).
     public static func encodeWav(_ wav: Data,
                                  bitrate: UInt32 = 0,
+                                 sizeProfile: UInt32 = 0,
                                  maxBytes: Int = 0,
                                  loopStart: Int32 = -1,
                                  loopEnd: Int32 = 0,
@@ -76,6 +86,7 @@ public enum At9Codec {
         opts.max_bytes = maxBytes
         opts.loop_start = loopStart
         opts.loop_end = loopEnd
+        opts.size_profile = sizeProfile
         if let box = box {
             opts.progress = trampoline
             opts.user = Unmanaged.passUnretained(box).toOpaque()

@@ -1087,7 +1087,7 @@ pub const PS_CROSS_BGM_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// best-quality, no-loop, uncapped encode.
 pub fn encode(wav: &WavPcm, opts: &super::EncodeOptions) -> Result<Vec<u8>> {
     let bitrate = opts.bitrate;
-    let max_bytes = opts.max_bytes;
+    let max_bytes = opts.size_limit.max_bytes();
     let progress = opts.progress;
     if wav.sample_rate == 0 || wav.channels == 0 {
         return Err(Error::BadConfig);
@@ -1156,12 +1156,15 @@ pub fn encode(wav: &WavPcm, opts: &super::EncodeOptions) -> Result<Vec<u8>> {
         want
     };
     let frame_bytes = if max_bytes > 0 {
+        // Highest standard size at or below the target that fits the cap. If none
+        // fits (even the lowest rate overflows), the track is too long for this
+        // size limit — report it rather than emitting an oversized, unusable file.
         valid_fb
             .iter()
             .rev()
             .copied()
             .find(|&fb| fb <= want_fb && file_size(fb) <= max_bytes)
-            .unwrap_or(valid_fb[0])
+            .ok_or(Error::ExceedsSizeLimit)?
     } else {
         want_fb
     };
@@ -1343,5 +1346,24 @@ mod tests {
         // 144 kbps is a valid stereo rate at 48 kHz; 36 kbps (a mono rate) is not.
         assert!(standard_bitrates(2, sr).contains(&144_000));
         assert!(!standard_bitrates(2, sr).contains(&36_000));
+    }
+
+    #[test]
+    fn size_limit_reports_when_nothing_fits() {
+        use crate::encode::SizeLimit;
+        let sr = 48000u32;
+        let n = 48000usize; // ~1 s stereo
+        let samples: Vec<i16> = (0..n * 2).map(|i| ((i % 211) as i16 - 105) * 120).collect();
+        let wav = WavPcm { channels: 2, sample_rate: sr, samples };
+        let enc = |sl| encode(&wav, &crate::encode::EncodeOptions { size_limit: sl, ..Default::default() });
+
+        // A generous cap fits; an absurdly small one cannot, at any standard rate.
+        assert!(enc(SizeLimit::VitaSystemBgm).is_ok());
+        assert!(enc(SizeLimit::Bytes(usize::MAX)).is_ok());
+        assert_eq!(enc(SizeLimit::Bytes(2_000)), Err(Error::ExceedsSizeLimit));
+        // The named profiles resolve to the codec's own caps.
+        assert_eq!(SizeLimit::VitaSystemBgm.max_bytes(), VITA_BGM_MAX_BYTES);
+        assert_eq!(SizeLimit::PsCross.max_bytes(), PS_CROSS_BGM_MAX_BYTES);
+        assert_eq!(SizeLimit::None.max_bytes(), 0);
     }
 }

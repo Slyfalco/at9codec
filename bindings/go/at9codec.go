@@ -11,9 +11,9 @@
 //
 //	pcm, ch, rate, _ := at9codec.Decode(at9bytes, nil)
 //	out, _ := at9codec.EncodeWav(wavbytes, at9codec.Options{
-//	        LoopStart: 0,                       // whole-track loop
-//	        MaxBytes:  at9codec.VitaBgmMaxBytes, // Vita theme cap
-//	        Progress:  func(d, t uint32) { fmt.Printf("\r%d/%d", d, t) },
+//	        LoopStart:   0,                     // whole-track loop
+//	        SizeProfile: at9codec.SizeVitaBgm,  // codec owns the limit
+//	        Progress:    func(d, t uint32) { fmt.Printf("\r%d/%d", d, t) },
 //	})
 package at9codec
 
@@ -35,18 +35,27 @@ import (
 	"unsafe"
 )
 
+// Size profiles: name a console target and the codec applies its own byte cap.
 const (
-	VitaBgmMaxBytes    = 5 * 1024 * 1024
-	PsCrossBgmMaxBytes = 2 * 1024 * 1024
+	SizeNone    = 0
+	SizeVitaBgm = 1 // PS Vita system/theme BGM (under 5 MB)
+	SizePsCross = 2 // tighter 2 MiB cap for PS4/PS5 cross-support
 )
 
 // Options controls an encode. The zero value is "best quality, no loop, uncapped".
 type Options struct {
-	Bitrate   uint32                 // 0 = best standard default
-	MaxBytes  uint64                 // 0 = no cap; else a *BgmMaxBytes value
-	LoopStart int32                  // <0 none, 0 whole track, >0 from this sample
-	LoopEnd   int32                  // <=0 to track end, >0 inclusive last sample
-	Progress  func(done, total uint32)
+	Bitrate     uint32 // 0 = best standard default
+	SizeProfile uint32 // Size*; non-zero makes the codec apply its own cap (overrides MaxBytes)
+	MaxBytes    uint64 // custom cap in bytes; 0 = no cap; ignored if SizeProfile set
+	LoopStart   int32  // <0 none, 0 whole track, >0 from this sample
+	LoopEnd     int32  // <=0 to track end, >0 inclusive last sample
+	Progress    func(done, total uint32)
+}
+
+// ProfileMaxBytes returns the codec's byte cap for a size profile (Size*); 0 = no
+// cap/unknown. Reads the limit from the library so you never hard-code it.
+func ProfileMaxBytes(sizeProfile uint32) uint64 {
+	return uint64(C.at9_profile_max_bytes(C.uint32_t(sizeProfile)))
 }
 
 //export goAt9Progress
@@ -100,6 +109,7 @@ func EncodeWav(wav []byte, o Options) ([]byte, error) {
 	opts.max_bytes = C.size_t(o.MaxBytes)
 	opts.loop_start = C.int32_t(o.LoopStart)
 	opts.loop_end = C.int32_t(o.LoopEnd)
+	opts.size_profile = C.uint32_t(o.SizeProfile)
 	if o.Progress != nil {
 		h := cgo.NewHandle(o.Progress)
 		defer h.Delete()
@@ -110,6 +120,9 @@ func EncodeWav(wav []byte, o Options) ([]byte, error) {
 	var outLen C.size_t
 	rc := C.at9_encode_wav((*C.uint8_t)(unsafe.Pointer(&wav[0])), C.size_t(len(wav)), &opts,
 		&out, &outLen)
+	if rc == C.AT9_ERR_TOO_LARGE {
+		return nil, fmt.Errorf("track too long to fit the size limit")
+	}
 	if rc != C.AT9_OK {
 		return nil, fmt.Errorf("at9_encode_wav failed: %d", int(rc))
 	}

@@ -57,11 +57,12 @@ breaking existing callers.
 typedef struct {
     uint32_t      struct_size;   /* = sizeof(At9EncodeOptions)                 */
     uint32_t      bitrate;       /* bits/sec; 0 = best standard default        */
-    size_t        max_bytes;     /* 0 = no cap; else AT9_*_BGM_MAX_BYTES        */
+    size_t        max_bytes;     /* custom cap; 0 = none; ignored if profile set*/
     int32_t       loop_start;    /* <0 none; 0 whole track; >0 from this sample */
     int32_t       loop_end;      /* <=0 to track end; >0 inclusive last sample  */
     At9ProgressCb progress;      /* NULL = none                                */
     void         *user;
+    uint32_t      size_profile;  /* AT9_SIZE_*; non-zero overrides max_bytes    */
 } At9EncodeOptions;
 
 typedef struct {
@@ -78,8 +79,9 @@ converts to 16-bit internally (clamping cleanly on down-conversion). `at9_encode
 takes interleaved 16-bit PCM directly. **Any input sample rate is accepted** — if
 it isn't a console rate (48/24/12 kHz) the codec resamples to the nearest one with
 a band-limited (windowed-sinc) filter, scaling loop points to match, so you never
-have to resample yourself. `bitrate = 0` picks the best standard rate; any value is
-snapped to a standard AT9 bitrate the hardware accepts.
+have to resample yourself. `bitrate = 0` picks the best standard rate (the highest
+that fits any size limit); a non-zero `bitrate` must be one of the standard AT9
+rates for the stream, or the encode fails with `AT9_ERR_BITRATE`.
 
 ### Loops
 
@@ -88,12 +90,16 @@ snapped to a standard AT9 bitrate the hardware accepts.
 the track end; `> 0` = an explicit inclusive last sample. They are written to the
 AT9 `smpl` chunk and read back by `at9_parse_info()`.
 
-### Size caps for theme BGM
+### Size limits for theme BGM
 
-`max_bytes` keeps the output at or under a byte budget by choosing the highest
-standard bitrate that fits (`0` = no cap, up to the RIFF container's 4 GiB). Use
-`AT9_VITA_BGM_MAX_BYTES` (~5 MB) for PS Vita theme BGM, or
-`AT9_PS_CROSS_BGM_MAX_BYTES` (2 MiB) for a theme that must also run on PS4/PS5.
+The codec owns the console limits, so name the target with `size_profile` instead of
+passing a byte count: `AT9_SIZE_VITA_BGM` (under ~5 MB) for PS Vita theme BGM, or
+`AT9_SIZE_PS_CROSS` (2 MiB) for a theme that must also run on PS4/PS5. The encoder
+picks the highest standard bitrate whose file fits, and returns `AT9_ERR_TOO_LARGE`
+if the track is too long to fit even at the lowest bitrate (rather than writing an
+oversized, unusable file). For a non-console budget, leave `size_profile = 0` and set
+`max_bytes` to a custom cap. `at9_profile_max_bytes(profile)` returns a profile's byte
+cap, so non-C callers can read the limits instead of hard-coding them.
 
 ### Progress
 
@@ -133,10 +139,10 @@ void on_progress(void *user, uint32_t done, uint32_t total) {
     printf("\r%u%%", total ? done * 100 / total : 0);
 }
 At9EncodeOptions opts = {0};
-opts.struct_size = sizeof opts;
-opts.loop_start  = 0;                       /* whole-track loop            */
-opts.max_bytes   = AT9_VITA_BGM_MAX_BYTES;  /* keep it Vita-usable         */
-opts.progress    = on_progress;
+opts.struct_size  = sizeof opts;
+opts.loop_start   = 0;                     /* whole-track loop            */
+opts.size_profile = AT9_SIZE_VITA_BGM;     /* codec applies its own cap   */
+opts.progress     = on_progress;
 at9_encode_wav(wav, wav_len, &opts, &out, &out_len);
 at9_free_at9(out, out_len);
 

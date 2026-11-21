@@ -42,16 +42,20 @@ int main(int argc, char **argv) {
     unsigned char *wav = read_file(argv[1], &wav_len);
     if (!wav) { fprintf(stderr, "cannot read %s\n", argv[1]); return 1; }
 
-    /* Encode: whole-track loop, Vita size cap, progress. */
+    /* Encode: whole-track loop, Vita size cap (named so the codec owns the limit),
+     * progress. */
     At9EncodeOptions opts = {0};
     opts.struct_size = sizeof opts;
     opts.loop_start  = 0;                       /* 0 = whole-track loop */
-    opts.max_bytes   = AT9_VITA_BGM_MAX_BYTES;
+    opts.size_profile = AT9_SIZE_VITA_BGM;      /* codec applies its own cap */
     opts.progress    = on_progress;
 
     uint8_t *at9 = NULL; size_t at9_len = 0;
     int rc = at9_encode_wav(wav, wav_len, &opts, &at9, &at9_len);
     free(wav);
+    if (rc == AT9_ERR_TOO_LARGE) {
+        fprintf(stderr, "\ntrack too long to fit the size limit\n"); return 1;
+    }
     if (rc != AT9_OK) { fprintf(stderr, "\nencode failed: %d\n", rc); return 1; }
     printf("\nencoded %zu bytes\n", at9_len);
 

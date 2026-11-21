@@ -121,7 +121,7 @@ fn cmd_rewrap(input: &str, output: &str) -> ExitCode {
 }
 
 fn cmd_encode(args: &[String]) -> ExitCode {
-    use at9codec::encode::encoder::{PS_CROSS_BGM_MAX_BYTES, VITA_BGM_MAX_BYTES};
+    use at9codec::encode::SizeLimit;
     let vita_bgm = args.iter().any(|a| a == "--vita-system-bgm");
     let ps_cross = args.iter().any(|a| a == "--ps-cross");
     let positional: Vec<&str> = args
@@ -142,15 +142,16 @@ fn cmd_encode(args: &[String]) -> ExitCode {
         }
     };
     // --ps-cross is the tighter 2 MiB cap (PS4/PS5); --vita-system-bgm is the
-    // Vita's under-5 MB cap; neither flag = no cap (general game AT9).
-    let (max_bytes, label) = if ps_cross {
-        (PS_CROSS_BGM_MAX_BYTES, "2 MiB PS4/PS5")
+    // Vita's under-5 MB cap; neither flag = no cap (general game AT9). The codec
+    // owns the actual limits — the flags just name the target.
+    let size_limit = if ps_cross {
+        SizeLimit::PsCross
     } else if vita_bgm {
-        (VITA_BGM_MAX_BYTES, "Vita 5 MB")
+        SizeLimit::VitaSystemBgm
     } else {
-        (0, "")
+        SizeLimit::None
     };
-    let opts = at9codec::encode::EncodeOptions { max_bytes, ..Default::default() };
+    let opts = at9codec::encode::EncodeOptions { size_limit, ..Default::default() };
     match at9codec::encode::encode_wav(&buf, &opts) {
         Ok(at9) => {
             if let Err(e) = std::fs::write(output, &at9) {
@@ -158,14 +159,14 @@ fn cmd_encode(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
             println!("encoded {} bytes -> {output}", at9.len());
-            if max_bytes > 0 && at9.len() > max_bytes {
-                eprintln!(
-                    "warning: {} bytes exceeds the {label} system-BGM limit even at the \
-                     lowest bitrate — the console will not use it; shorten the track.",
-                    at9.len()
-                );
-            }
             ExitCode::SUCCESS
+        }
+        Err(at9codec::error::Error::ExceedsSizeLimit) => {
+            eprintln!(
+                "error: the track is too long to fit the size limit even at the lowest \
+                 bitrate — the console will not use it; shorten the track."
+            );
+            ExitCode::FAILURE
         }
         Err(e) => {
             eprintln!("error: {e}");

@@ -17,18 +17,49 @@ pub mod huffenc;
 pub mod resample;
 pub mod wavread;
 
+/// How large the encoded file may be. The codec owns the console limits, so a
+/// caller names the target instead of passing a raw byte count. The encoder picks
+/// the highest standard bitrate whose file fits, and returns
+/// [`Error::ExceedsSizeLimit`] if even the lowest bitrate overflows the cap.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum SizeLimit {
+    /// No cap (up to the RIFF 4 GiB container) — general game AT9.
+    #[default]
+    None,
+    /// The PS Vita system/theme BGM limit (under 5 MB); the console won't use a
+    /// larger theme BGM.
+    VitaSystemBgm,
+    /// The tighter 2 MiB limit for a theme BGM that must also run on PS4/PS5.
+    PsCross,
+    /// A custom cap in bytes.
+    Bytes(usize),
+}
+
+impl SizeLimit {
+    /// The cap in bytes (`0` = no cap). The console limits come from the codec's
+    /// own constants, so callers never hard-code them.
+    pub fn max_bytes(self) -> usize {
+        match self {
+            SizeLimit::None => 0,
+            SizeLimit::VitaSystemBgm => encoder::VITA_BGM_MAX_BYTES,
+            SizeLimit::PsCross => encoder::PS_CROSS_BGM_MAX_BYTES,
+            SizeLimit::Bytes(n) => n,
+        }
+    }
+}
+
 /// Options for the encoders. Every field defaults to "automatic"/"off", so build
 /// one with [`EncodeOptions::default()`] and set only what you need.
 #[derive(Default)]
 pub struct EncodeOptions<'a> {
-    /// Target bitrate in bits/sec. `0` = a sensible default for the channel count.
-    /// Snapped to the nearest standard AT9 bitrate the hardware accepts.
+    /// Target bitrate in bits/sec. `0` = auto (the highest standard rate that fits
+    /// `size_limit`). A non-zero value must be one of the standard rates for the
+    /// stream (see [`encoder::standard_bitrates`]), else [`Error::InvalidBitrate`].
     pub bitrate: u32,
-    /// Keep the output at or under this many bytes (`0` = no cap, up to the RIFF
-    /// 4 GiB container). The encoder picks the highest standard bitrate that fits
-    /// — pass [`encoder::VITA_BGM_MAX_BYTES`] / [`encoder::PS_CROSS_BGM_MAX_BYTES`]
-    /// for console theme BGM.
-    pub max_bytes: usize,
+    /// How large the output may be. Defaults to [`SizeLimit::None`]; name the
+    /// target console with [`SizeLimit::VitaSystemBgm`] / [`SizeLimit::PsCross`]
+    /// and the codec applies its own limit.
+    pub size_limit: SizeLimit,
     /// Loop start, in decoded-PCM samples: `None` = no loop, `Some(0)` = loop the
     /// whole track, `Some(n)` = loop from sample `n`.
     pub loop_start: Option<u32>,

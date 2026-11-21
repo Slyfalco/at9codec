@@ -53,8 +53,8 @@ at9 encode --ps-cross        input.wav out.at9   # cap at 2 MiB (PS4/PS5 too)
 default-settings encode plays out of the box; `--ps-cross` uses the tighter 2 MiB
 cap for a theme that must also run on PS4/PS5. With no flag there is no cap
 (general game AT9, up to the RIFF container's 4 GiB). The same control is exposed
-to embedders through the library's `max_bytes` argument (see
-`docs/USING_THE_LIBRARY.md`).
+to embedders through the library's `size_profile` option, which names the target so
+the codec applies its own limit (see `docs/USING_THE_LIBRARY.md`).
 
 ## Using it from other languages
 

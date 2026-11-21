@@ -4,9 +4,9 @@ Ready-to-use wrappers around the at9codec C ABI, one folder per language. Each
 exposes the same two operations over the options-struct API:
 
 - **decode** AT9 → interleaved little-endian 16-bit PCM (+ channels, sample rate)
-- **encode** a WAV buffer → AT9, with optional **bitrate**, **size cap**
-  (`VITA_BGM_MAX_BYTES` / `PS_CROSS_BGM_MAX_BYTES`), **loop** (start + optional
-  end), and a **progress callback**.
+- **encode** a WAV buffer → AT9, with optional **bitrate**, **size profile**
+  (`SIZE_VITA_BGM` / `SIZE_PS_CROSS` — the codec owns the byte limits), **loop**
+  (start + optional end), and a **progress callback**.
 
 The codec accepts any input sample rate (it resamples to a console rate itself)
 and any WAV bit depth, so callers don't resample or convert. See
