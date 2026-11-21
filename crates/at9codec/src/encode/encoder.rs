@@ -28,6 +28,36 @@ const FRAME_SAMPLES: usize = 256;
 const ENCODER_DELAY: u32 = 256;
 const FRAMES_PER_SUPERFRAME: usize = 4;
 
+// The standard ATRAC9 frame sizes (bytes/frame) the hardware accepts, per channel
+// count — determined empirically against the reference tool (any other size is
+// rejected). The bitrate a size maps to scales with the sample rate:
+// bitrate = frame_bytes * 8 * (sample_rate / FRAME_SAMPLES). At 48 kHz that is
+// mono 36..96 kbps and stereo 72..192 kbps.
+const MONO_FRAME_SIZES: [usize; 6] = [24, 32, 40, 48, 56, 64];
+const STEREO_FRAME_SIZES: [usize; 6] = [48, 64, 80, 96, 112, 128];
+
+/// Frame sizes valid for `channels` (mono = 1, anything else = stereo).
+fn frame_sizes(channels: usize) -> &'static [usize] {
+    if channels == 1 {
+        &MONO_FRAME_SIZES
+    } else {
+        &STEREO_FRAME_SIZES
+    }
+}
+
+/// The standard ATRAC9 bitrates (bits/sec), low to high, that this codec can encode
+/// for `channels` at `sample_rate`. An explicit [`super::EncodeOptions::bitrate`]
+/// must be 0 (auto) or exactly one of these, else [`encode`] returns
+/// [`Error::InvalidBitrate`]. The set depends on both channel count and sample
+/// rate, so verify against the rate you will actually encode at.
+pub fn standard_bitrates(channels: u16, sample_rate: u32) -> Vec<u32> {
+    let fps = sample_rate as f64 / FRAME_SAMPLES as f64;
+    frame_sizes(channels as usize)
+        .iter()
+        .map(|&fb| (fb as f64 * 8.0 * fps).round() as u32)
+        .collect()
+}
+
 /// One block's chosen parameters + quantized data, ready to pack.
 struct BlockPlan {
     band_count: usize,
@@ -1105,24 +1135,25 @@ pub fn encode(wav: &WavPcm, opts: &super::EncodeOptions) -> Result<Vec<u8>> {
     //   mono   24,32,40,48,56,64 bytes    = 36,48,60,72,84,96 kbps
     //   stereo 48,64,80,96,112,128 bytes  = 72,96,120,144,168,192 kbps
     // (bitrate = frame_bytes * 1500 at 48 kHz). First pick the target size from
-    // the bitrate (0 = highest standard = best quality; explicit = snap DOWN to a
-    // standard size), then, if a `max_bytes` cap is set (e.g. VITA_BGM_MAX_BYTES
-    // for theme BGM), reduce to the highest standard size that fits the cap. Each
-    // frame is filled to exactly frame_bytes, so the size is exact:
-    // num_frames * frame_bytes + a small container header.
+    // the bitrate (0 = highest standard = best quality; an explicit bitrate must be
+    // exactly one of the standard rates for this stream, else InvalidBitrate), then,
+    // if a `max_bytes` cap is set (e.g. VITA_BGM_MAX_BYTES for theme BGM), reduce to
+    // the highest standard size that fits the cap. Each frame is filled to exactly
+    // frame_bytes, so the size is exact: num_frames * frame_bytes + a small header.
     const CONTAINER_OVERHEAD: usize = 256;
-    let valid_fb: &[usize] = if channels == 1 {
-        &[24, 32, 40, 48, 56, 64]
-    } else {
-        &[48, 64, 80, 96, 112, 128]
-    };
+    let valid_fb = frame_sizes(channels);
     let file_size = |fb: usize| num_frames * fb + CONTAINER_OVERHEAD;
     let want_fb = if bitrate == 0 {
         *valid_fb.last().unwrap()
     } else {
+        // Verify the requested bitrate is a real standard rate for this stream
+        // rather than silently snapping an arbitrary value to something else.
         let frames_per_sec = wav.sample_rate as f64 / FRAME_SAMPLES as f64;
         let want = ((bitrate as f64 / 8.0) / frames_per_sec).round() as usize;
-        valid_fb.iter().rev().copied().find(|&fb| fb <= want).unwrap_or(valid_fb[0])
+        if !valid_fb.contains(&want) {
+            return Err(Error::InvalidBitrate);
+        }
+        want
     };
     let frame_bytes = if max_bytes > 0 {
         valid_fb
@@ -1291,5 +1322,26 @@ mod tests {
         }
         let snr = 10.0 * (energy / err.max(1e-9)).log10();
         assert!(snr > 20.0, "round-trip SNR too low: {snr:.1} dB");
+    }
+
+    #[test]
+    fn explicit_bitrate_is_validated() {
+        let sr = 48000u32;
+        let n = 2048usize;
+        let samples: Vec<i16> = (0..n * 2).map(|i| ((i % 97) as i16 - 48) * 100).collect();
+        let wav = WavPcm { channels: 2, sample_rate: sr, samples };
+        let opt = |bitrate| crate::encode::EncodeOptions { bitrate, ..Default::default() };
+
+        // Auto (0) and every listed standard stereo bitrate encode fine.
+        assert!(encode(&wav, &opt(0)).is_ok());
+        for br in standard_bitrates(2, sr) {
+            assert!(encode(&wav, &opt(br)).is_ok(), "standard {br} rejected");
+        }
+        // A non-standard bitrate is rejected rather than silently snapped.
+        assert_eq!(encode(&wav, &opt(150_000)), Err(Error::InvalidBitrate));
+        assert_eq!(encode(&wav, &opt(1_000)), Err(Error::InvalidBitrate));
+        // 144 kbps is a valid stereo rate at 48 kHz; 36 kbps (a mono rate) is not.
+        assert!(standard_bitrates(2, sr).contains(&144_000));
+        assert!(!standard_bitrates(2, sr).contains(&36_000));
     }
 }

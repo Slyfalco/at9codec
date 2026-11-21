@@ -17,6 +17,10 @@ pub const AT9_ERR_NULL: i32 = -1;
 pub const AT9_ERR_PARSE: i32 = -2;
 pub const AT9_ERR_DECODE: i32 = -3;
 pub const AT9_ERR_ENCODE: i32 = -4;
+/// The requested encode bitrate is not a standard ATRAC9 rate for the stream's
+/// channel count and sample rate. Use 0 in `At9EncodeOptions::bitrate` for auto
+/// (the encoder picks the best standard rate that fits any size cap).
+pub const AT9_ERR_BITRATE: i32 = -5;
 
 /// Progress callback: `(user, units_done, units_total)`. One unit = one
 /// superframe. Invoked from a single thread (a dedicated monitor thread for
@@ -263,6 +267,7 @@ pub unsafe extern "C" fn at9_encode(
             *out_len = len;
             AT9_OK
         }
+        Err(crate::error::Error::InvalidBitrate) => AT9_ERR_BITRATE,
         Err(_) => AT9_ERR_ENCODE,
     }
 }
@@ -307,6 +312,7 @@ pub unsafe extern "C" fn at9_encode_wav(
             *out_len = len;
             AT9_OK
         }
+        Err(crate::error::Error::InvalidBitrate) => AT9_ERR_BITRATE,
         Err(_) => AT9_ERR_ENCODE,
     }
 }

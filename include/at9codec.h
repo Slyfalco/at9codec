@@ -32,6 +32,7 @@ extern "C" {
 #define AT9_ERR_PARSE  -2  /* input is not a valid AT9 container              */
 #define AT9_ERR_DECODE -3  /* decoding failed                                 */
 #define AT9_ERR_ENCODE -4  /* encoding failed (e.g. unsupported sample rate)  */
+#define AT9_ERR_BITRATE -5 /* bitrate is not a standard rate; use 0 for auto  */
 
 /*
  * Theme-BGM size caps (bytes) for At9EncodeOptions.max_bytes. The PS Vita won't

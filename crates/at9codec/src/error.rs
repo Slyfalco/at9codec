@@ -18,6 +18,10 @@ pub enum Error {
     Truncated(&'static str),
     /// The ATRAC9 config data (4 bytes in the `fmt ` extra) is invalid.
     BadConfig,
+    /// An explicit encode bitrate was requested that is not a standard ATRAC9
+    /// rate for the stream's channel count and sample rate. Use 0 (auto) or one
+    /// of [`crate::encode::encoder::standard_bitrates`].
+    InvalidBitrate,
     /// Feature not yet implemented (e.g. decode/encode in progress).
     NotImplemented(&'static str),
 }
@@ -30,6 +34,9 @@ impl fmt::Display for Error {
             Error::NotAtrac9 => write!(f, "fmt chunk is not an ATRAC9 descriptor"),
             Error::Truncated(c) => write!(f, "chunk too short to parse: {c}"),
             Error::BadConfig => write!(f, "invalid ATRAC9 config data"),
+            Error::InvalidBitrate => {
+                write!(f, "bitrate is not a standard ATRAC9 rate for this stream")
+            }
             Error::NotImplemented(w) => write!(f, "not implemented yet: {w}"),
         }
     }
