@@ -9,7 +9,7 @@ Wine.
 Until now the only working AT9 encoder was a Windows-only command-line tool,
 which forces non-Windows apps to ship it under Wine. A native, cross-platform
 codec removes that dependency and makes AT9 usable from any language on any OS.
-Now it can beat that tool in encoding speed and quality of audio.
+Now this implementation can beat that tool in encoding speed and quality of audio.
 
 ## Status
 
