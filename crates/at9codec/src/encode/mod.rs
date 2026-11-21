@@ -214,7 +214,10 @@ pub fn build_at9_container(
     smpl.extend_from_slice(&0u32.to_le_bytes()); // SMPTE format
     smpl.extend_from_slice(&0u32.to_le_bytes()); // SMPTE offset
     smpl.extend_from_slice(&1u32.to_le_bytes()); // num loops
-    smpl.extend_from_slice(&0u32.to_le_bytes()); // sampler data
+    // cbSamplerData: the reference encoder writes the loop-list size here (24
+    // bytes per loop record), NOT 0. The hardware uses this field to recognise
+    // the loop, so a 0 here means the console ignores the loop and won't loop.
+    smpl.extend_from_slice(&24u32.to_le_bytes()); // sampler data = 1 loop * 24 bytes
     smpl.extend_from_slice(&0u32.to_le_bytes()); // cue point id
     smpl.extend_from_slice(&0u32.to_le_bytes()); // loop type (forward)
     smpl.extend_from_slice(&start.to_le_bytes());
