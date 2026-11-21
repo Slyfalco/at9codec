@@ -54,6 +54,8 @@ at9 encode --loop-start 100000 --loop-end 2000000 input.wav out.at9  # loop a se
 at9 encode --vita-system-bgm --loop input.wav out.at9  # flags combine
 ```
 
+### Size limits
+
 `--vita-system-bgm` keeps the file under the PS Vita's theme-BGM size limit
 (~5 MB) by auto-selecting the highest standard bitrate that fits, so a
 default-settings encode plays out of the box; `--ps-cross` uses the tighter 2 MiB
