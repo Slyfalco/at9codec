@@ -56,13 +56,16 @@ at9 encode --vita-system-bgm --loop input.wav out.at9  # flags combine
 
 ### Size limits
 
-`--vita-system-bgm` keeps the file under the PS Vita's theme-BGM size limit
-(~5 MB) by auto-selecting the highest standard bitrate that fits, so a
-default-settings encode plays out of the box; `--ps-cross` uses the tighter 2 MiB
-cap for a theme that must also run on PS4/PS5. With no flag there is no cap
-(general game AT9, up to the RIFF container's 4 GiB). The same control is exposed
-to embedders through the library's `size_profile` option, which names the target so
-the codec applies its own limit (see `docs/USING_THE_LIBRARY.md`).
+`--vita-system-bgm` makes a file the PS Vita theme player accepts: it caps the
+bitrate at **144 kbps** (the player silently won't use BGM above that — stereo lands
+on 144 kbps, mono on its 96 kbps max) and keeps the file under the ~5 MB theme limit,
+auto-selecting the highest standard rate that fits, so a default-settings encode plays
+out of the box. `--ps-cross` uses the tighter 2 MiB cap for a theme that must also run
+on PS4/PS5. With no flag there is no cap and every standard rate up to 192 kbps is
+available (general game AT9, up to the RIFF container's 4 GiB). The same control is
+exposed to embedders through the library's `size_profile` option, which names the
+target so the codec applies its own size and bitrate limits (see
+`docs/USING_THE_LIBRARY.md`).
 
 ### Custom loop points
 

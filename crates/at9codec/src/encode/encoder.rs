@@ -1134,23 +1134,43 @@ pub fn encode(wav: &WavPcm, opts: &super::EncodeOptions) -> Result<Vec<u8>> {
     // the reference tool (any other size is rejected "Not Supported Param"), at 48 kHz:
     //   mono   24,32,40,48,56,64 bytes    = 36,48,60,72,84,96 kbps
     //   stereo 48,64,80,96,112,128 bytes  = 72,96,120,144,168,192 kbps
-    // (bitrate = frame_bytes * 1500 at 48 kHz). First pick the target size from
-    // the bitrate (0 = highest standard = best quality; an explicit bitrate must be
-    // exactly one of the standard rates for this stream, else InvalidBitrate), then,
-    // if a `max_bytes` cap is set (e.g. VITA_BGM_MAX_BYTES for theme BGM), reduce to
-    // the highest standard size that fits the cap. Each frame is filled to exactly
+    // (bitrate = frame_bytes * 1500 at 48 kHz). First pick the target size from the
+    // bitrate (0 = highest standard that respects the profile's bitrate ceiling, if
+    // any; an explicit bitrate must be a standard rate at or below that ceiling, else
+    // InvalidBitrate), then, if a size cap is set (e.g. the Vita theme limit), reduce
+    // to the highest standard size that fits the cap. Each frame is filled to exactly
     // frame_bytes, so the size is exact: num_frames * frame_bytes + a small header.
     const CONTAINER_OVERHEAD: usize = 256;
     let valid_fb = frame_sizes(channels);
     let file_size = |fb: usize| num_frames * fb + CONTAINER_OVERHEAD;
+    let frames_per_sec = wav.sample_rate as f64 / FRAME_SAMPLES as f64;
+    // A profile may cap the bitrate below the format maximum (e.g. the Vita theme
+    // player only plays BGM up to 144 kbps). Convert that ceiling to a frame-size cap.
+    let ceiling_fb = opts
+        .size_limit
+        .max_bitrate()
+        .map(|br| ((br as f64 / 8.0) / frames_per_sec).round() as usize);
     let want_fb = if bitrate == 0 {
-        *valid_fb.last().unwrap()
+        // Highest standard size, but never above the profile's bitrate ceiling.
+        match ceiling_fb {
+            Some(c) => valid_fb
+                .iter()
+                .rev()
+                .copied()
+                .find(|&fb| fb <= c)
+                .unwrap_or(valid_fb[0]),
+            None => *valid_fb.last().unwrap(),
+        }
     } else {
         // Verify the requested bitrate is a real standard rate for this stream
         // rather than silently snapping an arbitrary value to something else.
-        let frames_per_sec = wav.sample_rate as f64 / FRAME_SAMPLES as f64;
         let want = ((bitrate as f64 / 8.0) / frames_per_sec).round() as usize;
         if !valid_fb.contains(&want) {
+            return Err(Error::InvalidBitrate);
+        }
+        // Reject a bitrate above the profile's ceiling — it would encode a valid
+        // stream that the target (e.g. the Vita theme player) silently won't play.
+        if ceiling_fb.is_some_and(|c| want > c) {
             return Err(Error::InvalidBitrate);
         }
         want
@@ -1365,5 +1385,42 @@ mod tests {
         assert_eq!(SizeLimit::VitaSystemBgm.max_bytes(), VITA_BGM_MAX_BYTES);
         assert_eq!(SizeLimit::PsCross.max_bytes(), PS_CROSS_BGM_MAX_BYTES);
         assert_eq!(SizeLimit::None.max_bytes(), 0);
+    }
+
+    #[test]
+    fn vita_profile_caps_bitrate_at_144() {
+        use crate::encode::{EncodeOptions, SizeLimit};
+        let sr = 48000u32;
+        let n = 24000usize; // 0.5 s
+        let mk = |ch: usize| {
+            let s: Vec<i16> = (0..n * ch).map(|i| ((i % 151) as i16 - 75) * 110).collect();
+            WavPcm { channels: ch as u16, sample_rate: sr, samples: s }
+        };
+        let frame_bytes = |at9: &[u8]| crate::parse(at9).unwrap().config.frame_bytes;
+
+        // Auto-bitrate under the Vita profile lands on 144 kbps stereo (96-byte
+        // frames), not the 192 kbps (128-byte) top rate — 192 won't play as theme BGM.
+        let vita_auto = EncodeOptions { size_limit: SizeLimit::VitaSystemBgm, ..Default::default() };
+        assert_eq!(frame_bytes(&encode(&mk(2), &vita_auto).unwrap()), 96);
+        // Mono's own max (96 kbps / 64-byte) is already below the ceiling.
+        assert_eq!(frame_bytes(&encode(&mk(1), &vita_auto).unwrap()), 64);
+
+        // An explicit bitrate above the ceiling is rejected (would not play).
+        let opt192 = EncodeOptions {
+            size_limit: SizeLimit::VitaSystemBgm,
+            bitrate: 192_000,
+            ..Default::default()
+        };
+        assert_eq!(encode(&mk(2), &opt192), Err(Error::InvalidBitrate));
+        // 144 kbps explicit is fine under the ceiling.
+        let opt144 = EncodeOptions {
+            size_limit: SizeLimit::VitaSystemBgm,
+            bitrate: 144_000,
+            ..Default::default()
+        };
+        assert!(encode(&mk(2), &opt144).is_ok());
+        // With no profile, 192 kbps is allowed (general/game AT9).
+        let opt192_free = EncodeOptions { bitrate: 192_000, ..Default::default() };
+        assert!(encode(&mk(2), &opt192_free).is_ok());
     }
 }

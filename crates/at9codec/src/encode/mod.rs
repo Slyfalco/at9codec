@@ -46,6 +46,21 @@ impl SizeLimit {
             SizeLimit::Bytes(n) => n,
         }
     }
+
+    /// Highest bitrate (bits/sec) the target's player accepts, if it caps below the
+    /// format maximum. The PS Vita theme player only plays BGM up to 144 kbps — a
+    /// higher-bitrate AT9 decodes fine but the theme silently won't use it — so
+    /// auto-bitrate must not exceed this, and an explicit higher bitrate is rejected.
+    /// `None` = no cap beyond the standard format rates (general/game AT9).
+    pub fn max_bitrate(self) -> Option<u32> {
+        match self {
+            // Proven Vita theme-BGM ceiling (what the reference tool and every
+            // community guide use); 192 kbps does not play as theme BGM.
+            SizeLimit::VitaSystemBgm => Some(144_000),
+            // PS4/PS5 theme bitrate limits are unverified — leave uncapped for now.
+            SizeLimit::PsCross | SizeLimit::None | SizeLimit::Bytes(_) => None,
+        }
+    }
 }
 
 /// Options for the encoders. Every field defaults to "automatic"/"off", so build

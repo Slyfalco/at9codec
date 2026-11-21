@@ -101,6 +101,13 @@ oversized, unusable file). For a non-console budget, leave `size_profile = 0` an
 `max_bytes` to a custom cap. `at9_profile_max_bytes(profile)` returns a profile's byte
 cap, so non-C callers can read the limits instead of hard-coding them.
 
+A profile can also cap the **bitrate**, not just the size: `AT9_SIZE_VITA_BGM` limits
+auto-bitrate to **144 kbps** (so stereo lands on 144 kbps, mono on its 96 kbps max),
+because the PS Vita theme player silently refuses BGM above that — a higher-bitrate AT9
+decodes fine but the theme won't use it. An explicit `bitrate` above a profile's ceiling
+is rejected (`AT9_ERR_BITRATE`). With no profile, every standard rate up to 192 kbps is
+available for general/game AT9.
+
 ### Progress
 
 Set `progress` (and optional `user`) to receive `(user, done, total)` in
