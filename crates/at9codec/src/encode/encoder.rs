@@ -729,6 +729,59 @@ fn pack_block_exact(
     None
 }
 
+/// Exact-fill a mono frame by real packing + measuring (fallback when the fast
+/// bit-model mis-sizes a frame). See [`fill_exact_stereo_real`] for the method.
+fn fill_exact_mono_real(
+    spectra: &[f64; 256],
+    first: bool,
+    sri: usize,
+    frame_bytes: usize,
+    huff: &HuffmanTables,
+    curves: &[[u8; 48]; 48],
+) -> Option<Vec<u8>> {
+    let max_band = (MAX_BAND_COUNT[sri] as usize).min(16);
+    let min_band = MIN_BAND_COUNT[0] as usize;
+    for band in (min_band..=max_band).rev() {
+        for boost in 0..=24 {
+            let ctx = block_sf(spectra, boost, Some(band), sri);
+            let pack = |gsv: i32, gb: i32, n: u32| -> Vec<u8> {
+                let plan = plan_from_sf(&ctx, spectra, gsv, gb, curves);
+                pack_block_to_vec(&plan, first, huff, Some(n))
+            };
+            let (mut lo, mut hi, mut fit) = (0i32, 31i32, -1i32);
+            while lo <= hi {
+                let mid = (lo + hi) / 2;
+                if pack(mid, 15, 0).len() <= frame_bytes {
+                    fit = mid;
+                    hi = mid - 1;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if fit < 0 {
+                break;
+            }
+            for gsv in [fit, fit + 1, fit + 2, fit + 3] {
+                if !(0..=31).contains(&gsv) {
+                    continue;
+                }
+                for gb in (0..=15).rev() {
+                    for n in 0..=31u32 {
+                        let v = pack(gsv, gb, n);
+                        if v.len() == frame_bytes {
+                            return Some(v);
+                        }
+                        if v.len() > frame_bytes {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn encode_frame(
     frame_spectra: &[[f64; 256]],
     first: bool,
@@ -743,7 +796,13 @@ fn encode_frame(
         if let Some(v) = pack_block_exact(&frame_spectra[0], first, sri, curves, huff, frame_bytes) {
             return v;
         }
-        // Fallback (rare): smallest frame we can make, padded to frame_bytes.
+        // Robust fallback: real pack-and-measure fill (the fast model can mis-size
+        // near-silent frames). Exact frame_bytes with skippable filler, never raw
+        // zero padding (which would desync the continuous frame reader).
+        if let Some(v) = fill_exact_mono_real(&frame_spectra[0], first, sri, frame_bytes, huff, curves) {
+            return v;
+        }
+        // Last resort (should never happen): a minimal valid block, zero-padded.
         let plan = plan_block(&frame_spectra[0], 31, 0, 0, None, sri, curves);
         let mut v = pack_block_to_vec(&plan, first, huff, None);
         v.resize(frame_bytes, 0);
@@ -836,7 +895,15 @@ fn encode_stereo_frame(
             }
         }
     }
-    // Fallback (rare): max band, smallest frame, padded to frame_bytes.
+    // Robust exact-fill. The fast `used_bits` model can mis-size near-silent
+    // frames, so here we actually PACK candidates and measure, guaranteeing the
+    // frame is EXACTLY frame_bytes with decoder-skippable extension filler — never
+    // raw zero padding, which the continuous frame reader would desync on. The
+    // achievable size range spans frame_bytes, so a fit exists.
+    if let Some(v) = fill_exact_stereo_real(spec0, spec1, first, sri, max_band, frame_bytes, huff, curves) {
+        return v;
+    }
+    // Last resort (should never happen): a minimal valid block, zero-padded.
     let ctx0 = block_sf(spec0, 0, Some(max_band), sri);
     let ctx1 = block_sf(spec1, 0, Some(max_band), sri);
     let plan0 = plan_from_sf(&ctx0, spec0, 31, 0, curves);
@@ -844,6 +911,69 @@ fn encode_stereo_frame(
     let mut v = pack_stereo_to_vec(&plan0, &plan1, first, huff, None);
     v.resize(frame_bytes, 0);
     v
+}
+
+/// Exact-fill a stereo frame by real packing + measuring (the fallback when the
+/// fast bit-model mis-sizes a frame). Scans boost, then binary-searches the
+/// gradient start value for the largest block that fits, then refines over the
+/// gradient boundary and filler bits for an exact `frame_bytes` hit.
+#[allow(clippy::too_many_arguments)]
+fn fill_exact_stereo_real(
+    spec0: &[f64; 256],
+    spec1: &[f64; 256],
+    first: bool,
+    sri: usize,
+    max_band: usize,
+    frame_bytes: usize,
+    huff: &HuffmanTables,
+    curves: &[[u8; 48]; 48],
+) -> Option<Vec<u8>> {
+    // Sweep bands high -> low (keep as much bandwidth as fits) and boost low ->
+    // high. A loud/complex frame fits only at a lower band (fewer quant units); a
+    // quiet frame reaches the target at a higher band with a scale-factor boost.
+    let min_band = MIN_BAND_COUNT[0] as usize;
+    for band in (min_band..=max_band).rev() {
+        for boost in 0..=24 {
+            let ctx0 = block_sf(spec0, boost, Some(band), sri);
+            let ctx1 = block_sf(spec1, boost, Some(band), sri);
+            let pack = |gsv: i32, gb: i32, n: u32| -> Vec<u8> {
+                let p0 = plan_from_sf(&ctx0, spec0, gsv, gb, curves);
+                let p1 = plan_from_sf(&ctx1, spec1, gsv, gb, curves);
+                pack_stereo_to_vec(&p0, &p1, first, huff, Some(n))
+            };
+            // Largest block (smallest gsv) whose minimal-extension size fits.
+            let (mut lo, mut hi, mut fit) = (0i32, 31i32, -1i32);
+            while lo <= hi {
+                let mid = (lo + hi) / 2;
+                if pack(mid, 15, 0).len() <= frame_bytes {
+                    fit = mid;
+                    hi = mid - 1;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if fit < 0 {
+                break; // this band is too big even at gsv 31; boost only grows it
+            }
+            for gsv in [fit, fit + 1, fit + 2, fit + 3] {
+                if !(0..=31).contains(&gsv) {
+                    continue;
+                }
+                for gb in (0..=15).rev() {
+                    for n in 0..=31u32 {
+                        let v = pack(gsv, gb, n);
+                        if v.len() == frame_bytes {
+                            return Some(v);
+                        }
+                        if v.len() > frame_bytes {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// PS Vita theme-BGM size limit (under 5 MB): the console won't use a theme AT9
