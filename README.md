@@ -64,7 +64,9 @@ the codec applies its own limit (see `docs/USING_THE_LIBRARY.md`).
 
 ### Custom loop points
 
-By default the output has no loop. Add a loop with:
+**By default the output does not loop** — pass no loop flag for one-shots and any
+AT9 that should play through once (many game sounds and tracks don't loop). Add a
+loop only when you want one:
 
 - `--loop` — loop the **whole track** (repeats from the start).
 - `--loop-start <sample>` — loop **from** that sample index; playback jumps back
