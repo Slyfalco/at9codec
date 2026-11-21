@@ -43,7 +43,7 @@ cargo build --release
 ```sh
 at9 info   input.at9             # print container metadata
 at9 decode input.at9 out.wav     # decode to 16-bit PCM WAV
-at9 encode input.wav out.at9     # encode 16-bit PCM WAV to AT9 (no size cap)
+at9 encode input.wav out.at9     # encode WAV to AT9 (no size cap)
 at9 encode --vita-system-bgm input.wav out.at9   # cap under 5 MB for PS Vita theme BGM
 at9 encode --ps-cross        input.wav out.at9   # cap at 2 MiB (PS4/PS5 too)
 ```
