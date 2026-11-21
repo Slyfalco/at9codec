@@ -310,6 +310,39 @@ fn plan_block(
     plan_from_sf(&ctx, spectra, gsv, gb, curves)
 }
 
+/// Sum of squared reconstruction error of a packed block against the original
+/// spectrum. Coded quant units contribute their dequantization error; coefficients
+/// in bands above `quant_unit_count` (dropped — not coded, no band extension)
+/// contribute their full energy. Minimizing this over band-count candidates is what
+/// lets the rate control trade bandwidth for low-band precision the way the
+/// reference encoder does (fewer bands + higher precision beats more bands at
+/// precision 1–2 for the same byte budget).
+fn block_error(plan: &BlockPlan, spectra: &[f64; 256]) -> f64 {
+    let quc = plan.quant_unit_count;
+    let coded_coeffs = QUANT_UNIT_TO_COEFF_INDEX[quc] as usize;
+    let mut err = 0.0f64;
+    for i in 0..quc {
+        let lo = QUANT_UNIT_TO_COEFF_INDEX[i] as usize;
+        let hi = QUANT_UNIT_TO_COEFF_INDEX[i + 1] as usize;
+        let sf = plan.scale_factors[i] as usize;
+        let cstep = QUANTIZER_STEP_SIZE[plan.precisions[i] as usize] * SPECTRUM_SCALE[sf];
+        let fstep = if plan.precisions_fine[i] > 0 {
+            QUANTIZER_FINE_STEP_SIZE[plan.precisions_fine[i] as usize] * SPECTRUM_SCALE[sf]
+        } else {
+            0.0
+        };
+        for k in lo..hi {
+            let recon = plan.quantized[k] as f64 * cstep + plan.quantized_fine[k] as f64 * fstep;
+            let d = spectra[k] - recon;
+            err += d * d;
+        }
+    }
+    for &s in spectra.iter().take(256).skip(coded_coeffs) {
+        err += s * s;
+    }
+    err
+}
+
 /// Encode scale factors with VLC delta-offset (coding mode 0), matching the reference tool.
 /// Reconstructs as: sf[i] = r[i] + baseValue - weights[i], where r[0] is sent
 /// raw and r[i] = (r[i-1] + delta) & (valueMax-1) with Huffman-coded deltas.
@@ -827,16 +860,13 @@ fn encode_stereo_frame(
     curves: &[[u8; 48]; 48],
 ) -> Vec<u8> {
     let target_bits = frame_bytes as i64 * 8;
-    let natural = choose_band_count(spec0, sri).max(choose_band_count(spec1, sri));
     let max_band = (MAX_BAND_COUNT[sri] as usize).min(16);
-    let mut attempts: Vec<(usize, i32)> = vec![(natural, 0)];
-    if max_band != natural {
-        attempts.push((max_band, 0));
-    }
-    for b in 1..=24 {
-        attempts.push((max_band, b));
-    }
-    for (band, boost) in attempts {
+    let min_band = MIN_BAND_COUNT[0] as usize;
+
+    // Search one (band, boost) configuration: size it with the fast bit model, pack
+    // the least-filler gradient that fits, and if it lands on exactly frame_bytes
+    // return the packed frame together with its reconstruction error.
+    let try_cfg = |band: usize, boost: i32| -> Option<(Vec<u8>, f64)> {
         let ctx0 = block_sf(spec0, boost, Some(band), sri);
         let ctx1 = block_sf(spec1, boost, Some(band), sri);
         let sf0 = sf_vlc_bits(&ctx0.sf, ctx0.quc, huff);
@@ -886,13 +916,51 @@ fn encode_stereo_frame(
                 }
             }
         }
-        if let Some((gsv, gb, n)) = best {
-            let plan0 = plan_from_sf(&ctx0, spec0, gsv, gb, curves);
-            let plan1 = plan_from_sf(&ctx1, spec1, gsv, gb, curves);
-            let v = pack_stereo_to_vec(&plan0, &plan1, first, huff, Some(n as u32));
-            if v.len() == frame_bytes {
-                return v;
+        let (gsv, gb, n) = best?;
+        let plan0 = plan_from_sf(&ctx0, spec0, gsv, gb, curves);
+        let plan1 = plan_from_sf(&ctx1, spec1, gsv, gb, curves);
+        let v = pack_stereo_to_vec(&plan0, &plan1, first, huff, Some(n as u32));
+        if v.len() != frame_bytes {
+            return None;
+        }
+        let err = block_error(&plan0, spec0) + block_error(&plan1, spec1);
+        Some((v, err))
+    };
+
+    // Trade bandwidth for precision: try every band count (boost 0) and keep the
+    // frame with the least reconstruction error. Fewer bands give higher per-unit
+    // precision but drop high-frequency energy; the per-frame error metric balances
+    // the two — the same bandwidth-vs-precision trade the reference encoder makes by
+    // choosing a lower band_count at constrained bitrates (coding more bands at
+    // precision 1–2 is worse than fewer bands at precision 4–7 for the same bytes).
+    // The error-vs-band-count curve is unimodal (dropping bands raises precision
+    // until the lost high-frequency energy dominates), so sweep high -> low and stop
+    // once the error has risen off the minimum for two bands running — this keeps the
+    // quality of a full sweep while evaluating only the handful of bands near the
+    // optimum, so the per-frame cost stays close to the old single-attempt path.
+    let mut best: Option<(Vec<u8>, f64)> = None;
+    let mut rising = 0;
+    for band in (min_band..=max_band).rev() {
+        if let Some((v, err)) = try_cfg(band, 0) {
+            if best.as_ref().map_or(true, |(_, be)| err < *be) {
+                best = Some((v, err));
+                rising = 0;
+            } else {
+                rising += 1;
+                if rising >= 2 {
+                    break;
+                }
             }
+        }
+    }
+    if let Some((v, _)) = best {
+        return v;
+    }
+    // Near-silent frames may not reach frame_bytes even at full band; boost the
+    // scale factors until the frame fills.
+    for boost in 1..=24 {
+        if let Some((v, _)) = try_cfg(max_band, boost) {
+            return v;
         }
     }
     // Robust exact-fill. The fast `used_bits` model can mis-size near-silent

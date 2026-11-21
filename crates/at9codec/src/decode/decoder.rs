@@ -310,7 +310,6 @@ impl Decoder {
                 quant_unit_count,
             );
             calculate_spectrum_codebook_index(&mut self.blocks[bi].channels[i], high);
-
             read_spectra(&mut self.blocks[bi].channels[i], br, &self.huffman, high);
             read_spectra_fine(&mut self.blocks[bi].channels[i], br);
         }

@@ -107,7 +107,7 @@ pub fn decode_container_progress(
         let base = sf * superframe_bytes;
         let sf_slice = &data[base..base + superframe_bytes];
         let mut off = 0usize;
-        for _ in 0..frames_per_superframe {
+        for _fi in 0..frames_per_superframe {
             let mut br = bitreader::BitReader::new(&sf_slice[off..]);
             decoder.decode_frame(&mut br, &mut raw)?;
             off += br.pos.div_ceil(8);
