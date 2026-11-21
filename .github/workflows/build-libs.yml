@@ -105,6 +105,16 @@ jobs:
               esac
             done
           done
+          # Per-os/arch zip assets (the format the embedding app fetches): each
+          # holds that platform's lib(s) + the header + license, flat.
+          for d in native/*/; do
+            tag="$(basename "$d")"
+            tmp="$(mktemp -d)"
+            cp "$d"/* "$tmp"/
+            cp include/at9codec.h LICENSE "$tmp"/
+            ( cd "$tmp" && zip -r - . ) > "assets/at9codec-$tag.zip"
+            rm -rf "$tmp"
+          done
           # Ship the header + license alongside the libs.
           cp include/at9codec.h native/at9codec.h
           cp LICENSE native/LICENSE
@@ -123,22 +133,18 @@ jobs:
             echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish / update release
+      - name: Upload libraries to the (manually created) release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          NOTES="Prebuilt at9codec shared libraries for every supported platform.
-
-          Drop \`at9codec-native-libs.zip\` contents into an embedding app's
-          \`native/\` directory, or grab a single library by name
-          (\`at9codec-<os>-<arch>\`). Includes the C header and license."
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" assets/* --clobber
-          else
-            gh release create "$TAG" assets/* \
-              --title "at9codec libraries ($TAG)" \
-              --notes "$NOTES" \
-              ${{ github.event_name == 'workflow_dispatch' && '--prerelease' || '' }}
+          # Releases are created by hand so a human writes the description. This job
+          # only uploads the lib assets (--clobber replaces same-named assets and
+          # leaves the release body untouched) — it never creates or overwrites a
+          # release. Fail clearly if the release doesn't exist yet.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release '$TAG' does not exist. Create it (tag $TAG, with its description) on GitHub first, then re-run this workflow. It never creates a release."
+            exit 1
           fi
+          gh release upload "$TAG" assets/* --clobber
