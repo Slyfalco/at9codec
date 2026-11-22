@@ -19,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish the libraries under'
+        description: 'Existing release tag to upload the libraries to (e.g. v1)'
         required: false
-        default: 'libs-latest'
+        default: 'v1'
 
 permissions:
   contents: write   # create/update the release
