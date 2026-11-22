@@ -30,6 +30,12 @@ jobs:
   build:
     name: ${{ matrix.tag }}
     runs-on: ${{ matrix.os }}
+    # Non-blocking: if a runner is unavailable/flaky (GitHub's ARM or older macOS
+    # images come and go), that platform is skipped rather than failing the whole
+    # run — the release still publishes the platforms that built, and you can make
+    # a missing one locally (scripts/build-libs.ps1) or by re-running.
+    continue-on-error: true
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -38,8 +44,11 @@ jobs:
           - { os: windows-11-arm,  target: aarch64-pc-windows-msvc,   tag: windows-arm64, lib: at9codec.dll }
           - { os: ubuntu-latest,   target: x86_64-unknown-linux-gnu,  tag: linux-x64,     lib: libat9codec.so }
           - { os: ubuntu-24.04-arm,target: aarch64-unknown-linux-gnu, tag: linux-arm64,   lib: libat9codec.so }
-          - { os: macos-14,        target: aarch64-apple-darwin,      tag: macos-arm64,   lib: libat9codec.dylib }
-          - { os: macos-13,        target: x86_64-apple-darwin,       tag: macos-x64,     lib: libat9codec.dylib }
+          # Both macOS libs build on macos-15 (the only reliably-provisioned image;
+          # macos-13/14 don't schedule for this account). x64 cross-compiles from the
+          # arm64 runner — pure Rust + the universal Apple SDK, no Rosetta needed.
+          - { os: macos-15,        target: aarch64-apple-darwin,      tag: macos-arm64,   lib: libat9codec.dylib }
+          - { os: macos-15,        target: x86_64-apple-darwin,       tag: macos-x64,     lib: libat9codec.dylib }
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +58,9 @@ jobs:
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }} -p at9codec
 
-      - name: Test (native host)
+      - name: Test (host-arch)
+        # Runs the host-arch build of the tests; validates the code on every runner
+        # (the cross-compiled x86_64 mac lib is covered by the arm64 run of the same code).
         run: cargo test --release -p at9codec
 
       - name: Stage library
@@ -74,7 +85,9 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: github.repository == 'Slyfalco/at9codec'
+    # always(): publish whatever platforms built, even if a flaky runner skipped one
+    # (continue-on-error makes build "succeed"; this guards the rare total-failure case).
+    if: ${{ always() && github.repository == 'Slyfalco/at9codec' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,6 +102,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p native assets
+          if ! ls incoming/lib-* >/dev/null 2>&1; then
+            echo "::error::no platform artifacts were produced — all build jobs failed."
+            exit 1
+          fi
           # download-artifact lays each one out as incoming/lib-<tag>/<files>.
           for d in incoming/lib-*; do
             tag="${d#incoming/lib-}"
