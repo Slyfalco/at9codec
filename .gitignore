@@ -12,9 +12,8 @@ Cargo.lock.bak
 /harness-out/
 *.wav
 
-# Reference decoders used only to validate the harness — never redistribute.
-the reference tool
-the reference encoder.exe
+# Local reference decoders used only to validate the harness — never redistributed.
+/*.exe
 
 # JetBrains IDE
 .idea/
