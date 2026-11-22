@@ -63,24 +63,26 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build (release)
-        run: cargo build --release --target ${{ matrix.target }} -p at9codec
+        # Build both the shared library and the `at9` CLI for this target.
+        run: cargo build --release --target ${{ matrix.target }} -p at9codec -p at9cli
 
       - name: Test (host-arch)
         # Runs the host-arch build of the tests; validates the code on every runner
         # (the cross-compiled x86_64 mac lib is covered by the arm64 run of the same code).
         run: cargo test --release -p at9codec
 
-      - name: Stage library
+      - name: Stage library + CLI
         shell: bash
         run: |
-          mkdir -p "stage/native/${{ matrix.tag }}"
-          cp "target/${{ matrix.target }}/release/${{ matrix.lib }}" \
-             "stage/native/${{ matrix.tag }}/${{ matrix.lib }}"
+          out="target/${{ matrix.target }}/release"
+          dst="stage/native/${{ matrix.tag }}"
+          mkdir -p "$dst"
+          cp "$out/${{ matrix.lib }}" "$dst/${{ matrix.lib }}"
           # On Windows also keep the import library for linking from C/C++.
-          if [ -f "target/${{ matrix.target }}/release/at9codec.dll.lib" ]; then
-            cp "target/${{ matrix.target }}/release/at9codec.dll.lib" \
-               "stage/native/${{ matrix.tag }}/at9codec.dll.lib"
-          fi
+          [ -f "$out/at9codec.dll.lib" ] && cp "$out/at9codec.dll.lib" "$dst/at9codec.dll.lib"
+          # The at9 CLI wrapper for this platform.
+          CLI="at9"; [ "${{ runner.os }}" = "Windows" ] && CLI="at9.exe"
+          cp "$out/$CLI" "$dst/$CLI"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
