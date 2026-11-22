@@ -105,46 +105,25 @@ jobs:
           pattern: lib-*
           path: incoming
 
-      - name: Assemble the native/ tree and assets
+      - name: Assemble per-os/arch zip assets
         shell: bash
         run: |
-          mkdir -p native assets
+          mkdir -p assets
           if ! ls incoming/lib-* >/dev/null 2>&1; then
             echo "::error::no platform artifacts were produced — all build jobs failed."
             exit 1
           fi
-          # download-artifact lays each one out as incoming/lib-<tag>/<files>.
+          # One zip per platform — the only release assets. Each holds that platform's
+          # library (+ the Windows import lib, for C/C++ linkers) plus the C header and
+          # license. No redundant flat/combined copies.
           for d in incoming/lib-*; do
             tag="${d#incoming/lib-}"
-            mkdir -p "native/$tag"
-            cp "$d"/* "native/$tag/"
-            # A flat, clearly-named copy for one-off downloads.
-            for f in "$d"/*; do
-              base="$(basename "$f")"
-              case "$base" in
-                *.dll.lib) cp "$f" "assets/at9codec-$tag.dll.lib" ;;
-                at9codec.dll)      cp "$f" "assets/at9codec-$tag.dll" ;;
-                libat9codec.so)    cp "$f" "assets/libat9codec-$tag.so" ;;
-                libat9codec.dylib) cp "$f" "assets/libat9codec-$tag.dylib" ;;
-              esac
-            done
-          done
-          # Per-os/arch zip assets (the format the embedding app fetches): each
-          # holds that platform's lib(s) + the header + license, flat.
-          for d in native/*/; do
-            tag="$(basename "$d")"
             tmp="$(mktemp -d)"
             cp "$d"/* "$tmp"/
             cp include/at9codec.h LICENSE "$tmp"/
             ( cd "$tmp" && zip -r - . ) > "assets/at9codec-$tag.zip"
             rm -rf "$tmp"
           done
-          # Ship the header + license alongside the libs.
-          cp include/at9codec.h native/at9codec.h
-          cp LICENSE native/LICENSE
-          # Combined archive laid out exactly as an embedding app's native/ dir.
-          ( cd native && zip -r ../assets/at9codec-native-libs.zip . )
-          ls -R native
           ls -l assets
 
       - name: Resolve tag
