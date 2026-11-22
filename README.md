@@ -38,26 +38,6 @@ cargo build --release
 # CLI:      target/release/at9[.exe]
 ```
 
-### Releasing the prebuilt libraries
-
-Releases are **created by hand** (you write the description); the tooling only
-uploads the per-os/arch lib assets (`at9codec-<os>-<arch>.zip`) to that release and
-never creates or overwrites it.
-
-- **macOS, and all platforms in one go:** the GitHub Actions workflow
-  [`.github/workflows/build-libs.yml`](.github/workflows/build-libs.yml) builds every
-  OS/arch and uploads the assets. Create the release first (tag + description), then
-  push that tag or run the workflow — it errors if the release doesn't exist.
-- **Windows + Linux locally** (no CI needed): `scripts/build-libs.ps1` builds the
-  host-arch Windows (native) and Linux (via a WSL Ubuntu* distro) libs into `dist/`.
-  Add `-Tag <tag>` to upload them to the existing release. Run it on a Windows-ARM
-  machine to produce the `arm64` assets.
-
-```powershell
-pwsh scripts/build-libs.ps1                 # -> dist/at9codec-windows-x64.zip, at9codec-linux-x64.zip
-pwsh scripts/build-libs.ps1 -Tag libs-latest # build, then upload to release 'libs-latest'
-```
-
 ## CLI
 
 ```sh
