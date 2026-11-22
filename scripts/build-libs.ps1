@@ -31,13 +31,16 @@
     -Tag <tag>               upload the zips to this existing release (assets only)
     -WslDistro <name>        force a specific WSL distro (default: auto-detect Ubuntu*)
     -SkipLinux               alias for -Targets windows
+    -X86                     also build 32-bit (i686) Windows/Linux libs (cross-compiled
+                             from the x64 host; Linux needs gcc-multilib, auto-installed)
 #>
 [CmdletBinding()]
 param(
   [string[]]$Targets = @('windows', 'linux'),
   [string]$Tag = '',
   [string]$WslDistro = '',
-  [switch]$SkipLinux
+  [switch]$SkipLinux,
+  [switch]$X86
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,6 +101,23 @@ if ($Targets -contains 'windows') {
   if (Test-Path $implib) { $files += $implib }   # import lib for C/C++ linking
   foreach ($f in $files) { if (-not (Test-Path $f)) { throw "missing build output: $f" } }
   $built.Add((Package-Tag "windows-$archTag" $files))
+
+  # Optional 32-bit (i686) Windows lib, cross-compiled from the x64 host.
+  if ($X86 -and $archTag -eq 'x64') {
+    Write-Host "windows-x86: cargo build --release --target i686-pc-windows-msvc" -ForegroundColor Yellow
+    Push-Location $RepoRoot
+    try {
+      rustup target add i686-pc-windows-msvc 2>&1 | Out-Null
+      cargo build --release --target i686-pc-windows-msvc -p at9codec
+      if ($LASTEXITCODE -ne 0) { throw "windows-x86 build failed ($LASTEXITCODE)" }
+    } finally { Pop-Location }
+    $rel86 = Join-Path $RepoRoot 'target/i686-pc-windows-msvc/release'
+    $files86 = @((Join-Path $rel86 'at9codec.dll'), $header, $license)
+    $il86 = Join-Path $rel86 'at9codec.dll.lib'
+    if (Test-Path $il86) { $files86 += $il86 }
+    foreach ($f in $files86) { if (-not (Test-Path $f)) { throw "missing x86 build output: $f" } }
+    $built.Add((Package-Tag "windows-x86" $files86))
+  }
 }
 
 # --- Linux (via WSL) -------------------------------------------------------
@@ -128,18 +148,36 @@ if ($Targets -contains 'linux') {
     $L.Add('export PATH="$CARGO_HOME/bin:$PATH"')
     $L.Add('mkdir -p /root/at9codec')
     $L.Add('rsync -a --delete --exclude .git --exclude target --exclude dist "$REPO/" /root/at9codec/')
+    $L.Add('X86="$2"')
     $L.Add('cd /root/at9codec')
     $L.Add('cargo build --release -p at9codec')
     $L.Add('cp target/release/libat9codec.so "$REPO/dist/stage-linux/libat9codec.so"')
+    # Optional 32-bit (i686) build: needs the 32-bit C runtime/linker + the target.
+    $L.Add('if [ "$X86" = "yes" ]; then')
+    $L.Add('  command -v i686-linux-gnu-gcc >/dev/null || apt-get install -y gcc-multilib')
+    $L.Add('  rustup target add i686-unknown-linux-gnu')
+    $L.Add('  cargo build --release --target i686-unknown-linux-gnu -p at9codec')
+    $L.Add('  cp target/i686-unknown-linux-gnu/release/libat9codec.so "$REPO/dist/stage-linux/libat9codec-x86.so"')
+    $L.Add('fi')
     $L.Add('echo BUILD_EXIT=0')
     $scriptPath = Join-Path $stage 'build-linux-lib.sh'
     [System.IO.File]::WriteAllText($scriptPath, (($L -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
 
+    $x86flag = if ($X86 -and $archTag -eq 'x64') { 'yes' } else { 'no' }
     Write-Host "linux-${archTag}: building via WSL distro '$distro' ..." -ForegroundColor Yellow
-    wsl -d $distro -u root -- bash -c "chmod +x '$wslRepo/dist/stage-linux/build-linux-lib.sh'; '$wslRepo/dist/stage-linux/build-linux-lib.sh' '$wslRepo'"
+    wsl -d $distro -u root -- bash -c "chmod +x '$wslRepo/dist/stage-linux/build-linux-lib.sh'; '$wslRepo/dist/stage-linux/build-linux-lib.sh' '$wslRepo' '$x86flag'"
     $so = Join-Path $stage 'libat9codec.so'
     if (-not (Test-Path $so)) { throw "linux build produced no libat9codec.so (see output above)" }
     $built.Add((Package-Tag "linux-$archTag" @($so, $header, $license)))
+    if ($x86flag -eq 'yes') {
+      $so86 = Join-Path $stage 'libat9codec-x86.so'
+      if (-not (Test-Path $so86)) { throw "linux-x86 build produced no libat9codec-x86.so" }
+      # Package under the plain lib name inside the x86 zip.
+      $so86named = Join-Path $stage 'x86/libat9codec.so'
+      New-Item -ItemType Directory -Force (Split-Path $so86named) | Out-Null
+      Copy-Item $so86 $so86named -Force
+      $built.Add((Package-Tag "linux-x86" @($so86named, $header, $license)))
+    }
   }
 }
 
