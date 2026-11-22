@@ -32,8 +32,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Non-blocking: if a runner is unavailable/flaky (GitHub's ARM or older macOS
     # images come and go), that platform is skipped rather than failing the whole
-    # run — the release still publishes the platforms that built, and you can make
-    # a missing one locally (scripts/build-libs.ps1) or by re-running.
+    # run — the release still publishes the platforms that built, and a missing one
+    # can be built locally or by re-running.
     continue-on-error: true
     timeout-minutes: 25
     strategy:
