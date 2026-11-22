@@ -113,17 +113,19 @@ jobs:
             echo "::error::no platform artifacts were produced — all build jobs failed."
             exit 1
           fi
-          # One zip per platform — the only release assets. Each holds that platform's
-          # library (+ the Windows import lib, for C/C++ linkers) plus the C header and
-          # license. No redundant flat/combined copies.
+          # One zip per platform — the platform's library (+ the Windows import lib,
+          # for C/C++ linkers) + the license (kept in-archive for MIT compliance). The
+          # C header is identical across platforms, so it ships once as a standalone
+          # asset instead of being duplicated in every zip.
           for d in incoming/lib-*; do
             tag="${d#incoming/lib-}"
             tmp="$(mktemp -d)"
             cp "$d"/* "$tmp"/
-            cp include/at9codec.h LICENSE "$tmp"/
+            cp LICENSE "$tmp"/
             ( cd "$tmp" && zip -r - . ) > "assets/at9codec-$tag.zip"
             rm -rf "$tmp"
           done
+          cp include/at9codec.h assets/at9codec.h    # standalone, shared across platforms
           ls -l assets
 
       - name: Resolve tag
