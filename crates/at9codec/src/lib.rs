@@ -28,6 +28,7 @@ mod ffi;
 
 pub use container::{Atrac9Config, Container, LoopInfo};
 pub use error::{Error, Result};
+pub use decode::streaming::StreamingDecoder;
 
 /// Library version string (from Cargo).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

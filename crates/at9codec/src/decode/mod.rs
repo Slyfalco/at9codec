@@ -11,6 +11,7 @@
 pub mod bex;
 pub mod bitreader;
 pub mod decoder;
+pub mod streaming;
 pub mod huffman;
 pub mod huffman_tables;
 pub mod mdct;
