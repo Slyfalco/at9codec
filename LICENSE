@@ -1,6 +1,61 @@
-MIT License
+at9codec License (MIT, with an attribution requirement)
 
 Copyright (c) 2026 Slyfalco
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+1. The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+
+2. Credit to the original creator. Any distribution of the Software or of a
+   modified version of it, including as part of another program or library (in
+   source or compiled form), must give clear and visible credit to the creator
+   of this implementation, for example:
+
+       Uses at9codec, an independent clean-room AT9 codec implementation
+       written by Slyfalco - https://github.com/Slyfalco/at9codec
+
+   (or "Based on at9codec, ..." for a modified version). The credit must appear
+   in the documentation, credits or license notices that accompany the
+   distribution and, where the distributed program has an "About", credits or
+   similar screen, on that screen as well. Existing credits to the creator must
+   not be removed or obscured. The credit identifies the origin of this code
+   only; it does not imply that the creator produced, endorses, or supports the
+   distributed or modified version.
+
+3. Independence. The Software is an independent implementation written from
+   public, openly licensed references (see the notices below). The copyright
+   above covers this implementation's code only. The Software is not
+   affiliated with, endorsed by, or sponsored by the owners of the audio
+   format it implements.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-------------------------------------------------------------------------------
+Third-party notices
+
+The Software was developed from the following open, MIT-licensed reference
+projects, whose notices are reproduced here as their licenses require.
+
+LibAtrac9 - https://github.com/Thealexbarney/LibAtrac9
+Copyright (c) 2018 Alex Barney
+
+VGAudio - https://github.com/Thealexbarney/VGAudio
+Copyright (c) 2016 (as stated in VGAudio's LICENSE; project by Alex Barney)
+
+Each of the above is licensed under the MIT License:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

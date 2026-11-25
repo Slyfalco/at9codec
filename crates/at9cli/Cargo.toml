@@ -3,7 +3,7 @@ name = "at9cli"
 description = "Command-line wrapper for the at9codec ATRAC9 decoder/encoder"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 

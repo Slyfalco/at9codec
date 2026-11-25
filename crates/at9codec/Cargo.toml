@@ -3,7 +3,7 @@ name = "at9codec"
 description = "Clean-room ATRAC9 (AT9) decoder/encoder library"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 

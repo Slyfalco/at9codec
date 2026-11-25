@@ -5,7 +5,8 @@ members = ["crates/at9codec", "crates/at9cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+# MIT with an attribution requirement (not plain MIT), so point at the file.
+license-file = "LICENSE"
 repository = "https://github.com/Slyfalco/at9codec"
 authors = ["Slyfalco"]
 

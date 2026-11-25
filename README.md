@@ -119,5 +119,15 @@ oracle** (known inputs → inspect outputs) — never decompiled, touched or cha
 
 ## License
 
-MIT (see [LICENSE](LICENSE)). The codec is clean-room and license-safe to ship as
-a standalone library.
+MIT with an attribution requirement (see [LICENSE](LICENSE)). You may use, modify
+and redistribute it freely, including inside your own programs, as long as you
+**credit this implementation's creator**: for example *"Uses at9codec, an
+independent clean-room AT9 codec implementation written by Slyfalco —
+https://github.com/Slyfalco/at9codec"* in your documentation or license notices,
+and on your app's About/credits screen if it has one. The codec is clean-room and
+license-safe to ship as a standalone library; the notices of the MIT-licensed
+reference projects it was developed from are included in the LICENSE file.
+
+at9codec is an independent implementation: its copyright covers this code only,
+and it is not affiliated with or endorsed by the owners of the audio format it
+implements.
