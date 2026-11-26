@@ -110,8 +110,12 @@ public enum At9Codec {
 ///
 ///     let s = try At9Stream(at9Data)
 ///     var buf = [Int16](repeating: 0, count: 4096)
-///     while case let n = s.read(&buf), n > 0 { play(buf[0..<n]) }
-///     if let (start, _) = s.loop { s.seek(start) }
+///     while true {
+///         let n = s.read(&buf)
+///         if n == 0 { break }
+///         play(buf[0..<n])
+///     }
+///     if let loop = s.loop { s.seek(loop.start) }
 public final class At9Stream {
     private let h: OpaquePointer
 
