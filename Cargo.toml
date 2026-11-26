@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/at9codec", "crates/at9cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "2.1.0"
 edition = "2021"
 # MIT with an attribution requirement (not plain MIT), so point at the file.
 license-file = "LICENSE"

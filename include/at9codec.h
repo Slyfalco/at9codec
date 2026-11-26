@@ -145,6 +145,47 @@ int32_t at9_encode_wav(const uint8_t *wav, size_t wav_len,
 /* Free a buffer returned by at9_encode()/at9_encode_wav(). len = *out_len. */
 void at9_free_at9(uint8_t *at9, size_t len);
 
+/*
+ * Streaming decode (since v2.1) — for playback. Open a stream over an AT9 file,
+ * then pull PCM in small chunks as your audio device needs it, and seek to loop.
+ * The stream keeps its own copy of the file, so your buffer may be freed after
+ * at9_stream_open(). Output is bit-identical to at9_decode(), including after a
+ * seek. A stream is not thread-safe: use each one from one thread at a time.
+ *
+ *   At9Stream *s;
+ *   if (at9_stream_open(data, len, &s) == AT9_OK) {
+ *       int16_t buf[4096];
+ *       size_t n;
+ *       while ((n = at9_stream_read(s, buf, 4096)) > 0) { play(buf, n); }
+ *       at9_stream_close(s);
+ *   }
+ */
+typedef struct At9Stream At9Stream;
+
+/* Open a stream. On AT9_OK, *out_stream is a handle to close with at9_stream_close. */
+int32_t at9_stream_open(const uint8_t *at9, size_t at9_len, At9Stream **out_stream);
+
+uint16_t at9_stream_channels(const At9Stream *stream);
+uint32_t at9_stream_sample_rate(const At9Stream *stream);
+uint64_t at9_stream_total_frames(const At9Stream *stream);   /* un-looped length    */
+uint64_t at9_stream_position(const At9Stream *stream);       /* current frame       */
+
+/* Loop region in frames: returns 1 and fills start / end (inclusive) if the file
+ * loops, else 0. Either pointer may be NULL. */
+int32_t at9_stream_loop(const At9Stream *stream, uint64_t *out_start, uint64_t *out_end);
+
+/* Decode up to sample_count interleaved samples into out (rounded down to whole
+ * frames, i.e. a multiple of the channel count). Returns the number written;
+ * 0 once the stream has ended. */
+size_t at9_stream_read(At9Stream *stream, int16_t *out, size_t sample_count);
+
+/* Seek to a frame (sample-accurate). To loop: seek to the loop start once the
+ * position passes the loop end. */
+void at9_stream_seek(At9Stream *stream, uint64_t frame);
+
+/* Free a stream (NULL is ignored). */
+void at9_stream_close(At9Stream *stream);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

@@ -14,6 +14,7 @@ package at9codec
 
 import com.sun.jna.*
 import com.sun.jna.ptr.IntByReference
+import com.sun.jna.ptr.LongByReference
 import com.sun.jna.ptr.PointerByReference
 
 /** size_t, sized correctly for the current platform. */
@@ -49,7 +50,7 @@ open class EncodeOptions : Structure() {
     @JvmField var size_profile = 0
 }
 
-private interface Lib : Library {
+internal interface Lib : Library {
     fun at9_version(): String
     fun at9_decode(at9: ByteArray, len: SizeT, opts: DecodeOptions?,
                    outPcm: PointerByReference, outCount: SizeTByReference,
@@ -59,6 +60,16 @@ private interface Lib : Library {
                        outAt9: PointerByReference, outLen: SizeTByReference): Int
     fun at9_free_at9(at9: Pointer, len: SizeT)
     fun at9_profile_max_bytes(sizeProfile: Int): SizeT
+    // Streaming (since v2.1).
+    fun at9_stream_open(at9: ByteArray, len: SizeT, outStream: PointerByReference): Int
+    fun at9_stream_channels(stream: Pointer): Short
+    fun at9_stream_sample_rate(stream: Pointer): Int
+    fun at9_stream_total_frames(stream: Pointer): Long
+    fun at9_stream_position(stream: Pointer): Long
+    fun at9_stream_loop(stream: Pointer, start: LongByReference, end: LongByReference): Int
+    fun at9_stream_read(stream: Pointer, out: ShortArray, sampleCount: SizeT): SizeT
+    fun at9_stream_seek(stream: Pointer, frame: Long)
+    fun at9_stream_close(stream: Pointer)
 }
 
 // JNA has no built-in ShortByReference; provide a minimal one for out uint16.
@@ -75,7 +86,7 @@ object At9Codec {
     private const val AT9_OK = 0
     private const val AT9_ERR_TOO_LARGE = -6
 
-    private val lib: Lib = Native.load("at9codec", Lib::class.java)
+    internal val lib: Lib = Native.load("at9codec", Lib::class.java)
 
     fun version(): String = lib.at9_version()
 
@@ -133,5 +144,54 @@ object At9Codec {
         } finally {
             lib.at9_free_at9(out.value, SizeT(outLen.getValue()))
         }
+    }
+}
+
+/**
+ * Pull-based AT9 decoder for playback (since v2.1): read PCM in small chunks as
+ * your audio device needs it, and seek to loop. Bit-identical to decode(). Use
+ * one stream from one thread at a time and close it (or use `use {}`).
+ *
+ *   At9Stream(at9Bytes).use { s ->
+ *       val buf = ShortArray(4096)
+ *       while (true) { val n = s.read(buf); if (n == 0) break; play(buf, n) }
+ *       s.loop?.let { (start, _) -> s.seek(start) }
+ *   }
+ */
+class At9Stream(at9: ByteArray) : AutoCloseable {
+    private var h: Pointer?
+
+    init {
+        val out = PointerByReference()
+        val rc = At9Codec.lib.at9_stream_open(at9, SizeT(at9.size.toLong()), out)
+        if (rc != 0) throw RuntimeException("at9_stream_open failed: $rc")
+        h = out.value
+    }
+
+    private fun handle(): Pointer = h ?: throw IllegalStateException("stream is closed")
+
+    val channels: Int get() = At9Codec.lib.at9_stream_channels(handle()).toInt() and 0xffff
+    val sampleRate: Int get() = At9Codec.lib.at9_stream_sample_rate(handle())
+    /** Un-looped length in frames. */
+    val totalFrames: Long get() = At9Codec.lib.at9_stream_total_frames(handle())
+    val position: Long get() = At9Codec.lib.at9_stream_position(handle())
+
+    /** Loop region in frames (end inclusive), or null if the file doesn't loop. */
+    val loop: Pair<Long, Long>?
+        get() {
+            val a = LongByReference(); val b = LongByReference()
+            return if (At9Codec.lib.at9_stream_loop(handle(), a, b) != 0) Pair(a.value, b.value) else null
+        }
+
+    /** Fill [buffer] with interleaved samples; returns how many (0 at the end). */
+    fun read(buffer: ShortArray): Int =
+        At9Codec.lib.at9_stream_read(handle(), buffer, SizeT(buffer.size.toLong())).toInt()
+
+    /** Reposition to a frame (sample-accurate). */
+    fun seek(frame: Long) = At9Codec.lib.at9_stream_seek(handle(), frame)
+
+    override fun close() {
+        h?.let { At9Codec.lib.at9_stream_close(it) }
+        h = null
     }
 }

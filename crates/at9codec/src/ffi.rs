@@ -361,6 +361,142 @@ pub unsafe extern "C" fn at9_encode_wav(
     }
 }
 
+// ---------------------------------------------------------------- streaming
+//
+// Pull-based decoding for playback: open a stream over an AT9 file, then read
+// PCM in small chunks as an audio device needs it, seeking for loops. The
+// stream keeps its own copy of the file, so the caller's buffer may be freed
+// after `at9_stream_open`. A stream is not thread-safe: use it from one thread
+// at a time (different streams are independent).
+
+/// Opaque streaming decoder handle (`At9Stream *` in C).
+pub struct At9Stream(crate::StreamingDecoder);
+
+/// Open a streaming decoder over a complete AT9 file buffer. On [`AT9_OK`]
+/// writes the handle to `*out_stream`; release it with [`at9_stream_close`].
+///
+/// # Safety
+/// `at9` must point to `at9_len` readable bytes; `out_stream` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_open(at9: *const u8, at9_len: usize, out_stream: *mut *mut At9Stream) -> i32 {
+    if at9.is_null() || out_stream.is_null() {
+        return AT9_ERR_NULL;
+    }
+    let buf = std::slice::from_raw_parts(at9, at9_len);
+    if container::parse(buf).is_err() {
+        return AT9_ERR_PARSE;
+    }
+    match crate::StreamingDecoder::new(buf) {
+        Ok(d) => {
+            *out_stream = Box::into_raw(Box::new(At9Stream(d)));
+            AT9_OK
+        }
+        Err(_) => AT9_ERR_DECODE,
+    }
+}
+
+/// Number of interleaved channels (0 if `stream` is null).
+///
+/// # Safety
+/// `stream` must be null or a live handle from [`at9_stream_open`].
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_channels(stream: *const At9Stream) -> u16 {
+    stream.as_ref().map_or(0, |s| s.0.channels())
+}
+
+/// Sample rate in Hz (0 if `stream` is null).
+///
+/// # Safety
+/// As [`at9_stream_channels`].
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_sample_rate(stream: *const At9Stream) -> u32 {
+    stream.as_ref().map_or(0, |s| s.0.sample_rate())
+}
+
+/// Total playable length in per-channel frames (the un-looped length).
+///
+/// # Safety
+/// As [`at9_stream_channels`].
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_total_frames(stream: *const At9Stream) -> u64 {
+    stream.as_ref().map_or(0, |s| s.0.total_frames())
+}
+
+/// Current playback position in per-channel frames.
+///
+/// # Safety
+/// As [`at9_stream_channels`].
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_position(stream: *const At9Stream) -> u64 {
+    stream.as_ref().map_or(0, |s| s.0.position())
+}
+
+/// The file's loop region in output frames. Returns 1 and writes
+/// `*out_start` / `*out_end` (inclusive last frame) if the file loops, else 0.
+/// Either out pointer may be null.
+///
+/// # Safety
+/// `stream` as [`at9_stream_channels`]; out pointers null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_loop(stream: *const At9Stream, out_start: *mut u64, out_end: *mut u64) -> i32 {
+    match stream.as_ref().and_then(|s| s.0.loop_region()) {
+        Some((a, b)) => {
+            if !out_start.is_null() {
+                *out_start = a;
+            }
+            if !out_end.is_null() {
+                *out_end = b;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Decode up to `sample_count` interleaved 16-bit samples into `out` (a
+/// multiple of the channel count is recommended). Returns the number written:
+/// less than `sample_count` only at the end of the stream, 0 once it has ended.
+///
+/// # Safety
+/// `stream` must be a live handle; `out` must point to `sample_count` writable
+/// `int16_t`s.
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_read(stream: *mut At9Stream, out: *mut i16, sample_count: usize) -> usize {
+    let Some(s) = stream.as_mut() else { return 0 };
+    // Whole frames only: a count that isn't a multiple of the channel count is
+    // rounded down, so a caller can never split a frame and shift the channels.
+    let ch = s.0.channels().max(1) as usize;
+    let sample_count = sample_count - sample_count % ch;
+    if out.is_null() || sample_count == 0 {
+        return 0;
+    }
+    s.0.read(std::slice::from_raw_parts_mut(out, sample_count))
+}
+
+/// Reposition to output frame `frame` (sample-accurate, bit-identical to a
+/// full decode from the start). Use it to loop: seek to the loop start when
+/// the position passes the loop end.
+///
+/// # Safety
+/// `stream` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_seek(stream: *mut At9Stream, frame: u64) {
+    if let Some(s) = stream.as_mut() {
+        s.0.seek(frame);
+    }
+}
+
+/// Free a stream from [`at9_stream_open`] (null is ignored).
+///
+/// # Safety
+/// `stream` must be null or a live handle, not used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn at9_stream_close(stream: *mut At9Stream) {
+    if !stream.is_null() {
+        drop(Box::from_raw(stream));
+    }
+}
+
 /// Free an AT9 byte buffer returned by [`at9_encode`] / [`at9_encode_wav`].
 /// `len` must be `*out_len`.
 ///
@@ -370,5 +506,52 @@ pub unsafe extern "C" fn at9_encode_wav(
 pub unsafe extern "C" fn at9_free_at9(at9: *mut u8, len: usize) {
     if !at9.is_null() {
         drop(Box::from_raw(std::slice::from_raw_parts_mut(at9, len)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::{encode_pcm16, EncodeOptions};
+
+    #[test]
+    fn c_stream_matches_c_decode_and_seeks_exactly() {
+        let mut pcm = Vec::new();
+        for i in 0..30_000usize {
+            let v = (f32::sin(i as f32 / 48000.0 * 440.0 * std::f32::consts::TAU) * 12000.0) as i16;
+            pcm.extend_from_slice(&[v, v / 2]);
+        }
+        let opts = EncodeOptions { loop_start: Some(8_000), ..Default::default() };
+        let at9 = encode_pcm16(&pcm, 2, 48000, &opts).unwrap();
+        let whole = crate::decode_to_pcm16(&at9).unwrap();
+        unsafe {
+            let mut s: *mut At9Stream = std::ptr::null_mut();
+            assert_eq!(at9_stream_open(at9.as_ptr(), at9.len(), &mut s), AT9_OK);
+            assert_eq!(at9_stream_channels(s), 2);
+            assert_eq!(at9_stream_sample_rate(s), 48000);
+            let (mut a, mut b) = (0u64, 0u64);
+            assert_eq!(at9_stream_loop(s, &mut a, &mut b), 1);
+            assert_eq!(a, 8_000);
+            let mut out = Vec::new();
+            let mut buf = vec![0i16; 999];
+            loop {
+                let n = at9_stream_read(s, buf.as_mut_ptr(), buf.len());
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            assert!(out == whole.samples, "C stream differs from the full decode");
+            assert_eq!(at9_stream_position(s), at9_stream_total_frames(s));
+            at9_stream_seek(s, a);
+            let n = at9_stream_read(s, buf.as_mut_ptr(), buf.len());
+            assert_eq!(&buf[..n], &whole.samples[a as usize * 2..a as usize * 2 + n]);
+            at9_stream_close(s);
+            // Null handles are harmless.
+            assert_eq!(at9_stream_read(std::ptr::null_mut(), buf.as_mut_ptr(), 10), 0);
+            at9_stream_close(std::ptr::null_mut());
+            let mut bad: *mut At9Stream = std::ptr::null_mut();
+            assert_eq!(at9_stream_open(b"nope".as_ptr(), 4, &mut bad), AT9_ERR_PARSE);
+        }
     }
 }

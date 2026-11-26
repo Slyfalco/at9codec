@@ -41,6 +41,7 @@ The header is standalone — it needs only `<stddef.h>` and `<stdint.h>`.
 | `at9_encode()`     | 16-bit PCM → AT9 (optional `At9EncodeOptions`).           |
 | `at9_encode_wav()` | WAV buffer → AT9 (optional `At9EncodeOptions`).           |
 | `at9_free_at9()`   | Free a buffer from the encode functions.                 |
+| `at9_stream_open()` … `at9_stream_close()` | Streaming decode for playback (since v2.1): pull PCM in chunks, seek to loop. See [Streaming](#streaming-for-playback). |
 
 The `int32_t` functions return `AT9_OK` (0) or a negative code (`AT9_ERR_NULL`,
 `AT9_ERR_PARSE`, `AT9_ERR_DECODE`, `AT9_ERR_ENCODE`).
@@ -122,6 +123,23 @@ plus length to your out-parameters. Release each buffer with its matching
 `at9_free_*` — **never** your own `free()`/`delete`, and never mix the two. All
 functions are stateless and re-entrant; call them concurrently on independent
 buffers.
+
+### Streaming (for playback)
+
+Since v2.1 you can decode **on demand** instead of all at once — what an audio
+player needs. `at9_stream_open()` takes the AT9 file (the stream keeps its own
+copy) and returns an `At9Stream *`. Then:
+
+- `at9_stream_read(s, buf, n)` fills `buf` with up to `n` interleaved samples
+  (rounded down to whole frames) and returns how many; `0` means the end.
+- `at9_stream_seek(s, frame)` jumps to any frame, sample-accurately.
+- `at9_stream_loop(s, &start, &end)` returns the file's loop region (if any). To
+  loop seamlessly, seek to `start` once the position passes `end`.
+- `at9_stream_channels/sample_rate/total_frames/position()` describe the stream;
+  `at9_stream_close()` frees it.
+
+Streamed output is bit-identical to `at9_decode()`, including after a seek. Each
+stream must be used from one thread at a time (different streams are independent).
 
 ## C / C++ by use case
 

@@ -103,3 +103,46 @@ public enum At9Codec {
         return Data(bytes: out, count: outLen)
     }
 }
+
+/// Pull-based AT9 decoder for playback (since v2.1): read PCM in small chunks as
+/// your audio device needs it, and seek to loop. Bit-identical to `decode`. Use
+/// one stream from one thread at a time; it is freed when released.
+///
+///     let s = try At9Stream(at9Data)
+///     var buf = [Int16](repeating: 0, count: 4096)
+///     while case let n = s.read(&buf), n > 0 { play(buf[0..<n]) }
+///     if let (start, _) = s.loop { s.seek(start) }
+public final class At9Stream {
+    private let h: OpaquePointer
+
+    public init(_ at9: Data) throws {
+        var out: OpaquePointer? = nil
+        let rc = at9.withUnsafeBytes { raw -> Int32 in
+            at9_stream_open(raw.bindMemory(to: UInt8.self).baseAddress, at9.count, &out)
+        }
+        guard rc == AT9_OK, let out = out else { throw At9CodecError.failed(rc) }
+        h = out
+    }
+
+    deinit { at9_stream_close(h) }
+
+    public var channels: Int { Int(at9_stream_channels(h)) }
+    public var sampleRate: Int { Int(at9_stream_sample_rate(h)) }
+    /// Un-looped length in frames.
+    public var totalFrames: UInt64 { at9_stream_total_frames(h) }
+    public var position: UInt64 { at9_stream_position(h) }
+
+    /// Loop region in frames (end inclusive), or nil if the file doesn't loop.
+    public var loop: (start: UInt64, end: UInt64)? {
+        var a: UInt64 = 0, b: UInt64 = 0
+        return at9_stream_loop(h, &a, &b) != 0 ? (a, b) : nil
+    }
+
+    /// Fill `buffer` with interleaved samples; returns how many (0 at the end).
+    public func read(_ buffer: inout [Int16]) -> Int {
+        buffer.withUnsafeMutableBufferPointer { at9_stream_read(h, $0.baseAddress, $0.count) }
+    }
+
+    /// Reposition to a frame (sample-accurate).
+    public func seek(_ frame: UInt64) { at9_stream_seek(h, frame) }
+}

@@ -65,9 +65,26 @@ int main(int argc, char **argv) {
     /* Decode it back (pass NULL options for defaults). */
     int16_t *pcm = NULL; size_t count = 0; uint16_t ch = 0; uint32_t sr = 0;
     rc = at9_decode(at9, at9_len, NULL, &pcm, &count, &ch, &sr);
-    at9_free_at9(at9, at9_len);
     if (rc != AT9_OK) { fprintf(stderr, "decode failed: %d\n", rc); return 1; }
     printf("decoded %zu samples, %u Hz, %u ch\n", count, sr, ch);
     at9_free_pcm(pcm, count);
+
+    /* Stream it, as a player would: pull small chunks, and seek to loop. */
+    At9Stream *s = NULL;
+    rc = at9_stream_open(at9, at9_len, &s);
+    at9_free_at9(at9, at9_len);              /* the stream keeps its own copy */
+    if (rc != AT9_OK) { fprintf(stderr, "stream open failed: %d\n", rc); return 1; }
+    uint64_t loop_start = 0, loop_end = 0;
+    int loops = at9_stream_loop(s, &loop_start, &loop_end);
+    printf("streaming %llu frames, loop: %s\n",
+           (unsigned long long)at9_stream_total_frames(s), loops ? "yes" : "no");
+    int16_t chunk[4096];
+    size_t streamed = 0, n;
+    while ((n = at9_stream_read(s, chunk, 4096)) > 0) {
+        streamed += n;                       /* hand `chunk` to the audio device */
+    }
+    if (loops) at9_stream_seek(s, loop_start);   /* jump back for the next loop */
+    printf("streamed %zu samples\n", streamed);
+    at9_stream_close(s);
     return 0;
 }

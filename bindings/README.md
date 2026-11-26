@@ -7,6 +7,8 @@ exposes the same two operations over the options-struct API:
 - **encode** a WAV buffer → AT9, with optional **bitrate**, **size profile**
   (`SIZE_VITA_BGM` / `SIZE_PS_CROSS` — the codec owns the byte limits), **loop**
   (start + optional end), and a **progress callback**.
+- **stream** (since v2.1) — a stream object for playback: read PCM in small
+  chunks, read the loop region, and seek (sample-accurate) to loop.
 
 The codec accepts any input sample rate (it resamples to a console rate itself)
 and any WAV bit depth, so callers don't resample or convert. See
@@ -31,7 +33,8 @@ cargo build --release   # -> target/release/at9codec.(dll|so|dylib) [+ at9codec.
 ## Per-language notes
 
 ### C / C++
-`c/example.c` is a complete program (encode a WAV to Vita BGM, decode it back).
+`c/example.c` is a complete program (encode a WAV to Vita BGM, decode it back,
+then stream it in chunks as a player would).
 Build lines are in its header comment. The header is `extern "C"`, so it compiles
 as C or C++.
 

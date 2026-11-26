@@ -129,3 +129,61 @@ func EncodeWav(wav []byte, o Options) ([]byte, error) {
 	defer C.at9_free_at9(out, outLen)
 	return C.GoBytes(unsafe.Pointer(out), C.int(outLen)), nil
 }
+
+// Stream is a pull-based decoder for playback (since v2.1): read PCM in small
+// chunks as your audio device needs it, and seek to loop. Output is
+// bit-identical to Decode. Use one Stream from one goroutine at a time and
+// Close it when done.
+//
+//	s, _ := at9codec.OpenStream(at9bytes)
+//	defer s.Close()
+//	buf := make([]int16, 4096)
+//	for n := s.Read(buf); n > 0; n = s.Read(buf) { play(buf[:n]) }
+//	if start, _, ok := s.Loop(); ok { s.Seek(start) }
+type Stream struct{ h *C.At9Stream }
+
+// OpenStream opens a stream over AT9 bytes (the library keeps its own copy).
+func OpenStream(at9 []byte) (*Stream, error) {
+	if len(at9) == 0 {
+		return nil, fmt.Errorf("empty input")
+	}
+	var h *C.At9Stream
+	rc := C.at9_stream_open((*C.uint8_t)(unsafe.Pointer(&at9[0])), C.size_t(len(at9)), &h)
+	if rc != C.AT9_OK {
+		return nil, fmt.Errorf("at9_stream_open failed: %d", int(rc))
+	}
+	return &Stream{h}, nil
+}
+
+func (s *Stream) Channels() int      { return int(C.at9_stream_channels(s.h)) }
+func (s *Stream) SampleRate() int    { return int(C.at9_stream_sample_rate(s.h)) }
+func (s *Stream) TotalFrames() uint64 { return uint64(C.at9_stream_total_frames(s.h)) }
+func (s *Stream) Position() uint64   { return uint64(C.at9_stream_position(s.h)) }
+
+// Loop returns the loop region in frames (end inclusive) and whether there is one.
+func (s *Stream) Loop() (start, end uint64, ok bool) {
+	var a, b C.uint64_t
+	if C.at9_stream_loop(s.h, &a, &b) != 0 {
+		return uint64(a), uint64(b), true
+	}
+	return 0, 0, false
+}
+
+// Read fills buf with interleaved samples and returns how many (0 at the end).
+func (s *Stream) Read(buf []int16) int {
+	if len(buf) == 0 {
+		return 0
+	}
+	return int(C.at9_stream_read(s.h, (*C.int16_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))))
+}
+
+// Seek repositions to a frame (sample-accurate).
+func (s *Stream) Seek(frame uint64) { C.at9_stream_seek(s.h, C.uint64_t(frame)) }
+
+// Close frees the stream.
+func (s *Stream) Close() {
+	if s.h != nil {
+		C.at9_stream_close(s.h)
+		s.h = nil
+	}
+}

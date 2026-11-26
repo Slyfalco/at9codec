@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "at9cli"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "at9codec",
 ]
 
 [[package]]
 name = "at9codec"
-version = "0.1.0"
+version = "2.1.0"

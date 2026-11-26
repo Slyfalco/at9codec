@@ -128,4 +128,72 @@ public static class At9Codec
         }
         finally { at9_free_at9(outAt9, outLen); }
     }
+
+    // ---- Streaming (since v2.1) -------------------------------------------------
+
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int at9_stream_open(byte[] at9, nuint len, out IntPtr stream);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern ushort at9_stream_channels(IntPtr stream);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern uint at9_stream_sample_rate(IntPtr stream);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern ulong at9_stream_total_frames(IntPtr stream);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern ulong at9_stream_position(IntPtr stream);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int at9_stream_loop(IntPtr stream, out ulong start, out ulong end);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern nuint at9_stream_read(IntPtr stream, [Out] short[] outBuf, nuint sampleCount);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void at9_stream_seek(IntPtr stream, ulong frame);
+    [DllImport("at9codec", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void at9_stream_close(IntPtr stream);
+}
+
+/// <summary>
+/// Pull-based AT9 decoder for playback (since v2.1): read PCM in small chunks as
+/// your audio device needs it, and seek to loop. Bit-identical to Decode().
+/// Use one stream from one thread at a time; dispose it when done.
+/// <code>
+/// using var s = new At9Stream(File.ReadAllBytes("bgm.at9"));
+/// var buf = new short[4096];
+/// int n;
+/// while ((n = s.Read(buf)) &gt; 0) Play(buf, n);
+/// if (s.Loop is (ulong start, ulong end)) s.Seek(start);
+/// </code>
+/// </summary>
+public sealed class At9Stream : IDisposable
+{
+    private IntPtr _h;
+
+    public At9Stream(byte[] at9)
+    {
+        int rc = At9Codec.at9_stream_open(at9, (nuint)at9.Length, out _h);
+        if (rc != At9Codec.AT9_OK) throw new Exception($"at9_stream_open failed: {rc}");
+    }
+
+    public int Channels => At9Codec.at9_stream_channels(_h);
+    public int SampleRate => (int)At9Codec.at9_stream_sample_rate(_h);
+    /// <summary>Un-looped length in frames.</summary>
+    public ulong TotalFrames => At9Codec.at9_stream_total_frames(_h);
+    public ulong Position => At9Codec.at9_stream_position(_h);
+
+    /// <summary>Loop region in frames (end inclusive), or null if the file doesn't loop.</summary>
+    public (ulong start, ulong end)? Loop =>
+        At9Codec.at9_stream_loop(_h, out ulong a, out ulong b) != 0 ? (a, b) : null;
+
+    /// <summary>Fill <paramref name="buffer"/> with interleaved samples; returns how many (0 at the end).</summary>
+    public int Read(short[] buffer) => (int)At9Codec.at9_stream_read(_h, buffer, (nuint)buffer.Length);
+
+    /// <summary>Reposition to a frame (sample-accurate).</summary>
+    public void Seek(ulong frame) => At9Codec.at9_stream_seek(_h, frame);
+
+    public void Dispose()
+    {
+        if (_h != IntPtr.Zero) { At9Codec.at9_stream_close(_h); _h = IntPtr.Zero; }
+        GC.SuppressFinalize(this);
+    }
+
+    ~At9Stream() { if (_h != IntPtr.Zero) At9Codec.at9_stream_close(_h); }
 }
