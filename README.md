@@ -19,6 +19,7 @@ Now this implementation can beat that tool in encoding speed and quality of audi
 | Decode → PCM (LibAtrac9 basis) | ✅ done |
 | Validation harness | ✅ done |
 | Encode (from scratch — no open ATRAC9 encoder exists) | ✅ done |
+| Native ATRAC9 Playback | ✅ done |
 
 Decode is verified **bit-for-bit identical** to the AT9 format across
 every test file (max sample difference 0). Run `tools/compare.py` against a folder
